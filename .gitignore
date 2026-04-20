@@ -1,0 +1,6 @@
+.env
+grad_env/
+__pycache__/
+*.pyc
+voice-planner-ui/node_modules/
+voice-planner-ui/dist/

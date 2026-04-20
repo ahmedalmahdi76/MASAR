@@ -1,0 +1,363 @@
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@300;400;500&family=IBM+Plex+Sans:wght@300;400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700&display=swap');
+/* ============================================
+   MASAR مسار — DESIGN TOKENS
+   Mission Control × Arabic Cartography
+   ============================================ */
+@font-face {
+  font-family: 'CaviarDreams';
+  src: url('./assets/fonts/CaviarDreams.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+}
+:root {
+  /* -- Spatial Palette -- */
+  --masar-void:        #080C14;  /* deepest background */
+  --masar-deep:        #0D1420;  /* primary surface */
+  --masar-surface:     #111827;  /* card / panel background */
+  --masar-elevated:    #1A2235;  /* elevated elements */
+  --masar-border:      #1E2D45;  /* default borders */
+  --masar-border-mid:  #2A3D5A;  /* emphasized borders */
+
+  /* -- Amber / Gold accent (compass / navigation) -- */
+  --masar-amber:       #F59E0B;
+  --masar-amber-dim:   #B45309;
+  --masar-amber-glow:  rgba(245, 158, 11, 0.12);
+  --masar-amber-line:  rgba(245, 158, 11, 0.35);
+
+  /* -- Cyan accent (signal / live data) -- */
+  --masar-cyan:        #22D3EE;
+  --masar-cyan-dim:    #0891B2;
+  --masar-cyan-glow:   rgba(34, 211, 238, 0.10);
+
+  /* -- Semantic -- */
+  --masar-success:     #10B981;
+  --masar-warning:     #F59E0B;
+  --masar-danger:      #EF4444;
+  --masar-muted:       #94A3B8;
+  --masar-signal:      #22C55E;   /* TTS / speaking state */
+
+  /* -- Typography -- */
+  --font-display:      'Syne', sans-serif;
+  --font-arabic: 'Cairo', sans-serif;
+  --font-body:         'IBM Plex Sans', sans-serif;
+  --font-mono:         'IBM Plex Mono', monospace;
+  --font-body: 'CaviarDreams', sans-serif;
+
+  /* -- Motion -- */
+  --ease-out-expo:     cubic-bezier(0.19, 1, 0.22, 1);
+  --ease-in-out:       cubic-bezier(0.4, 0, 0.2, 1);
+  --duration-fast:     150ms;
+  --duration-base:     250ms;
+  --duration-slow:     400ms;
+
+  /* -- Layout -- */
+  --radius-sm:         4px;
+  --radius-md:         8px;
+  --radius-lg:         12px;
+  --radius-xl:         16px;
+  --sidebar-width:     260px;
+}
+
+/* ============================================
+   RESET & BASE
+   ============================================ */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--masar-void);
+  color: #E2E8F0;
+  font-family: var(--font-body);
+  font-weight: 400;
+  line-height: 1.6;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+#root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ============================================
+   TYPOGRAPHY SCALE
+   ============================================ */
+
+.display-xl {
+  font-family: var(--font-display);
+  font-size: clamp(2.5rem, 6vw, 5rem);
+  font-weight: 800;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+}
+
+.display-lg {
+  font-family: var(--font-display);
+  font-size: clamp(1.8rem, 4vw, 3rem);
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.heading-md {
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.mono-sm {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 400;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.mono-md {
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  font-weight: 400;
+}
+
+/* ============================================
+   UTILITY CLASSES
+   ============================================ */
+
+.text-amber   { color: var(--masar-amber); }
+.text-cyan    { color: var(--masar-cyan); }
+.text-muted   { color: var(--masar-muted); }
+.text-success { color: var(--masar-success); }
+.text-danger  { color: var(--masar-danger); }
+
+.bg-surface   { background-color: var(--masar-surface); }
+.bg-elevated  { background-color: var(--masar-elevated); }
+
+.border-default { border: 1px solid var(--masar-border); }
+.border-mid     { border: 1px solid var(--masar-border-mid); }
+.border-amber   { border: 1px solid var(--masar-amber-line); }
+
+/* ============================================
+   SCROLLBAR
+   ============================================ */
+
+::-webkit-scrollbar        { width: 4px; }
+::-webkit-scrollbar-track  { background: var(--masar-deep); }
+::-webkit-scrollbar-thumb  { background: var(--masar-border-mid); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: var(--masar-amber-dim); }
+
+/* ============================================
+   PAGE TRANSITION WRAPPER
+   ============================================ */
+
+.page-enter {
+  animation: pageEnter var(--duration-slow) var(--ease-out-expo) forwards;
+}
+
+@keyframes pageEnter {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ============================================
+   MIC BUTTON ANIMATIONS
+   ============================================ */
+
+/* Mic open, silence — barely-there green breath */
+@keyframes mic-listening {
+  0%, 100% {
+    box-shadow:
+      0 0 0 3px  rgba(16, 185, 129, 0.15),
+      0 0 10px   rgba(16, 185, 129, 0.05);
+  }
+  50% {
+    box-shadow:
+      0 0 0 5px  rgba(16, 185, 129, 0.28),
+      0 0 18px   rgba(16, 185, 129, 0.12);
+  }
+}
+
+/* Speaking — warm amber corona, breathes with voice */
+@keyframes mic-speaking {
+  0%, 100% {
+    box-shadow:
+      0 0 0 3px  rgba(245, 158, 11, 0.5),
+      0 0 14px   rgba(245, 158, 11, 0.2),
+      0 0 36px   rgba(245, 158, 11, 0.07);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow:
+      0 0 0 5px  rgba(245, 158, 11, 0.85),
+      0 0 28px   rgba(245, 158, 11, 0.45),
+      0 0 60px   rgba(245, 158, 11, 0.18);
+    transform: scale(1.08);
+  }
+}
+
+.mic-btn-listening {
+  animation: mic-listening 2.2s ease-in-out infinite;
+}
+
+/* Streaming cursor — blinks at end of Masar response while tokens arrive */
+@keyframes cursor-blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
+.stream-cursor {
+  display: inline-block;
+  color: var(--masar-cyan);
+  animation: cursor-blink 0.75s ease-in-out infinite;
+  margin-left: 1px;
+  font-weight: 300;
+  user-select: none;
+}
+
+/* Thinking dots — cycles through one, two, three dots */
+@keyframes thinking-dots {
+  0%,  24% { content: '·';   }
+  25%, 49% { content: '··';  }
+  50%, 74% { content: '···'; }
+  75%, 100%{ content: '';    }
+}
+
+.thinking-dots::after {
+  content: '·';
+  animation: thinking-dots 1.2s steps(1) infinite;
+  color: var(--masar-cyan);
+}
+
+.mic-btn-speaking {
+  animation: mic-speaking 0.9s ease-in-out infinite;
+}
+
+/* Ripple rings — expand outward from mic button while recording */
+@keyframes mic-ripple {
+  0% {
+    transform: scale(1);
+    opacity: 0.5;
+  }
+  80%, 100% {
+    transform: scale(2.5);
+    opacity: 0;
+  }
+}
+
+.mic-ripple {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1.5px solid rgba(245, 158, 11, 0.4);
+  animation: mic-ripple 2.1s ease-out infinite;
+  pointer-events: none;
+}
+
+/* ============================================
+   TTS WAVEFORM BARS
+   ============================================ */
+
+@keyframes waveform-bar {
+  0%, 100% { height: 3px;  opacity: 0.5; }
+  50%       { height: 14px; opacity: 1;   }
+}
+
+/* Each bar gets a class; stagger is set via inline animationDelay */
+.waveform-bar {
+  width: 3px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--masar-cyan);
+  flex-shrink: 0;
+  transition: background 300ms, opacity 300ms;
+}
+
+.waveform-bar-active {
+  animation: waveform-bar 0.7s ease-in-out infinite;
+}
+
+/* ============================================
+   MASAR STATE INDICATOR
+   ============================================ */
+
+/* Thinking dot — cyan breath pulse */
+@keyframes state-pulse-thinking {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(34, 211, 238, 0.55);
+    opacity: 0.75;
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgba(34, 211, 238, 0);
+    opacity: 1;
+  }
+}
+
+/* Listening dot — amber beat */
+@keyframes state-pulse-listening {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.55);
+    opacity: 0.8;
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgba(245, 158, 11, 0);
+    opacity: 1;
+  }
+}
+
+/* Speaking dot — green pulse */
+@keyframes state-pulse-speaking {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.55);
+    opacity: 0.8;
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgba(34, 197, 94, 0);
+    opacity: 1;
+  }
+}
+
+.state-dot-listening { animation: state-pulse-listening 1.6s ease-in-out infinite; }
+.state-dot-thinking  { animation: state-pulse-thinking  1.2s ease-in-out infinite; }
+.state-dot-speaking  { animation: state-pulse-speaking  1.0s ease-in-out infinite; }
+
+/* ============================================
+   AMBIENT GRID BACKGROUND (shared)
+   ============================================ */
+
+.grid-bg {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    linear-gradient(var(--masar-border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--masar-border) 1px, transparent 1px);
+  background-size: 60px 60px;
+  opacity: 0.25;
+}
+
+.grid-bg::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse 80% 60% at 50% 0%, transparent 40%, var(--masar-void) 100%);
+}
