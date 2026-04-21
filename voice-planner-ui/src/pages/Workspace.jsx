@@ -13,6 +13,11 @@ import { useTTS } from '../hooks/useTTS';
 
 const TECH_LEVELS = ['Beginner', 'Professional', 'Expert'];
 
+// VAD silence thresholds — audioLevelRef is 0.0–1.0 (0 = below noise floor)
+const VAD_THRESHOLDS = { low: 0.05, medium: 0.02, high: 0.01 };
+const VAD_SILENCE_MS  = 1500;  // ms of continuous silence before turn closes
+const VAD_MIN_SPEECH  = 500;   // ms of speech required before VAD can trigger
+
 // Default fallback service if user lands directly on /workspace
 const DEFAULT_SERVICE = {
   id: 'fiber',
@@ -27,16 +32,19 @@ export default function Workspace() {
   const location   = useLocation();
   const service    = location.state?.service ?? DEFAULT_SERVICE;
 
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [techLevel, setTechLevel]     = useState('Professional');
-  const [sessions,  setSessions]      = useState(() => {
+  const [sidebarOpen,    setSidebarOpen]    = useState(true);
+  const [techLevel,      setTechLevel]      = useState('Professional');
+  const [vadSensitivity, setVadSensitivity] = useState('medium');
+  const [callActive,     setCallActive]     = useState(false);
+  const [sessions,       setSessions]       = useState(() => {
     try { return JSON.parse(localStorage.getItem('masar_sessions') || '[]'); }
     catch { return []; }
   });
 
-  const feedEndRef   = useRef(null);
-  const micBtnRef    = useRef(null);
-  const startTimeRef = useRef(Date.now());
+  const feedEndRef    = useRef(null);
+  const micBtnRef     = useRef(null);
+  const startTimeRef  = useRef(Date.now());
+  const prevStateRef  = useRef('idle'); // tracks previous masarState for restart logic
 
   const { turns, isRecording, isSpeaking, audioLevelRef, error, startRecording, stopRecording, clearTurns } = useAudioStream();
 
@@ -47,8 +55,8 @@ export default function Workspace() {
 
   // solutions:    { [turnId]: string } — tokens streamed from /solve (Layer 4)
   // solvingIds:   { [turnId]: true }  — present while Layer 4 SSE stream is open
-  const [solutions,   setSolutions]   = useState({});
-  const [solvingIds,  setSolvingIds]  = useState({});
+  const [solutions,  setSolutions]  = useState({});
+  const [solvingIds, setSolvingIds] = useState({});
 
   // Layer 5 — TTS
   const { ttsStates, play: playTTS, stop: stopTTS, replay: replayTTS, isSpeaking: masarSpeaking } = useTTS();
@@ -59,8 +67,8 @@ export default function Workspace() {
     turns.forEach(t => {
       if (
         !t.isActive &&
-        solutions[t.id] &&           // solution exists
-        !solvingIds[t.id] &&         // not still streaming
+        solutions[t.id] &&
+        !solvingIds[t.id] &&
         !ttsTriggeredRef.current.has(t.id)
       ) {
         ttsTriggeredRef.current.add(t.id);
@@ -71,9 +79,9 @@ export default function Workspace() {
 
   // Derive MASAR's current state — priority: speaking > listening > thinking > idle
   const isThinking = Object.keys(streamingIds).length > 0 || Object.keys(solvingIds).length > 0;
-  const masarState = masarSpeaking ? 'speaking'
-    : isRecording                  ? 'listening'
-    : isThinking                   ? 'thinking'
+  const masarState  = masarSpeaking ? 'speaking'
+    : isRecording                   ? 'listening'
+    : isThinking                    ? 'thinking'
     : 'idle';
 
   // Trigger refinement whenever a turn closes with captured text
@@ -83,6 +91,81 @@ export default function Workspace() {
       streamRefine(turn.id, turn.text, techLevel, service.id, setMasarResponses, setStreamingIds)
     );
   }, [turns]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-solve: fire Layer 4 as soon as Layer 3 finishes (replaces manual button)
+  useEffect(() => {
+    turns.forEach(t => {
+      if (
+        !t.isActive &&
+        masarResponses[t.id] &&
+        !streamingIds[t.id] &&
+        solutions[t.id] === undefined
+      ) {
+        streamSolve(t.id, masarResponses[t.id], techLevel, service.id, setSolutions, setSolvingIds);
+      }
+    });
+  }, [masarResponses, streamingIds, turns]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── VAD loop ─────────────────────────────────────────────────────────────
+  // Runs only while the call is active and the mic is open.
+  // Reads audioLevelRef (written by useAudioStream's own rAF) — no new audio pipeline.
+  useEffect(() => {
+    if (!callActive || !isRecording) return;
+
+    const THRESHOLD = VAD_THRESHOLDS[vadSensitivity];
+    let speechStart  = null;
+    let silenceStart = null;
+    let rafId;
+
+    let lastLogTime = 0;
+
+    const tick = () => {
+      const level = audioLevelRef.current;
+      const now   = Date.now();
+
+      // Log amplitude every 500ms so we can see what the VAD is actually reading
+      if (now - lastLogTime >= 500) {
+        console.log(`[VAD] level=${level.toFixed(4)} threshold=${THRESHOLD} speechStart=${speechStart ? now - speechStart + 'ms ago' : 'null'} silenceStart=${silenceStart ? now - silenceStart + 'ms ago' : 'null'}`);
+        lastLogTime = now;
+      }
+
+      if (level > THRESHOLD) {
+        // Speech detected — reset silence clock, start speech clock
+        if (!speechStart) speechStart = now;
+        silenceStart = null;
+      } else {
+        // Silence detected
+        if (!silenceStart) silenceStart = now;
+
+        const speechDuration  = speechStart ? (silenceStart - speechStart) : 0;
+        const silenceDuration = now - silenceStart;
+
+        if (speechDuration >= VAD_MIN_SPEECH && silenceDuration >= VAD_SILENCE_MS) {
+          console.log(`[VAD] FIRING stopRecording — speechDuration=${speechDuration}ms silenceDuration=${silenceDuration}ms`);
+          stopRecording();
+          return;
+        }
+      }
+
+      rafId = requestAnimationFrame(tick);
+    };
+
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [callActive, isRecording, vadSensitivity]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Auto-restart mic after pipeline completes ────────────────────────────
+  // When masarState transitions from any active state back to idle,
+  // and the call is still active, reopen the mic.
+  useEffect(() => {
+    const prev = prevStateRef.current;
+    prevStateRef.current = masarState;
+
+    if (!callActive) return;
+    if (prev !== 'idle' && masarState === 'idle') {
+      startRecording();
+    }
+  }, [masarState, callActive]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Drive mic button glow directly from amplitude — bypasses React renders entirely
   useEffect(() => {
@@ -95,7 +178,7 @@ export default function Workspace() {
     }
     let rafId;
     const update = () => {
-      const lvl = audioLevelRef.current; // 0.0 – 1.0
+      const lvl = audioLevelRef.current;
       if (micBtnRef.current) {
         const ring  = `0 0 0 ${2 + lvl * 6}px rgba(245,158,11,${(0.3 + lvl * 0.65).toFixed(2)})`;
         const aura  = `0 0 ${10 + lvl * 32}px rgba(245,158,11,${(0.12 + lvl * 0.48).toFixed(2)})`;
@@ -120,8 +203,20 @@ export default function Workspace() {
     feedEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [turns]);
 
+  // ── Call control ──────────────────────────────────────────────────────────
+  function startCall() {
+    setCallActive(true);
+    startRecording();
+  }
+
+  function endCall() {
+    setCallActive(false);
+    stopRecording();
+  }
+
   // Save session to localStorage + navigate to summary
   function endSession() {
+    endCall();
     if (turns.some(t => t.text)) {
       const firstText = turns.find(t => t.text)?.text ?? '';
       const label = firstText.length > 42 ? firstText.slice(0, 42) + '…' : firstText;
@@ -136,7 +231,7 @@ export default function Workspace() {
         durationSecs,
         time: new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }),
       };
-      const updated = [newSession, ...sessions].slice(0, 20); // keep last 20
+      const updated = [newSession, ...sessions].slice(0, 20);
       setSessions(updated);
       localStorage.setItem('masar_sessions', JSON.stringify(updated));
     }
@@ -147,7 +242,7 @@ export default function Workspace() {
 
   // Start a new session (save current + clear state)
   function newSession() {
-    stopRecording();
+    endCall();
     if (turns.some(t => t.text)) {
       const firstText = turns.find(t => t.text)?.text ?? '';
       const label = firstText.length > 42 ? firstText.slice(0, 42) + '…' : firstText;
@@ -175,7 +270,8 @@ export default function Workspace() {
     startTimeRef.current = Date.now();
   }
 
-  const isGeneral = service.id === 'general';
+  const isGeneral     = service.id === 'general';
+  const callBusy      = callActive && (masarState === 'thinking' || masarState === 'speaking');
 
   return (
     <div style={{ height: '100vh', display: 'flex', overflow: 'hidden', fontFamily: 'var(--font-body)' }}>
@@ -264,16 +360,31 @@ export default function Workspace() {
             {!sidebarOpen && (
               <SidebarIconBtn onClick={() => setSidebarOpen(true)} title="Open sidebar">→</SidebarIconBtn>
             )}
-            {/* Status dot */}
+            {/* Call status dot */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.375rem' }}>
               <div style={{
                 width: 7, height: 7, borderRadius: '50%',
-                background: isSpeaking ? 'var(--masar-danger)' : isRecording ? 'var(--masar-success)' : 'var(--masar-muted)',
-                boxShadow: isSpeaking ? '0 0 0 3px rgba(239,68,68,0.25)' : isRecording ? '0 0 0 3px rgba(16,185,129,0.2)' : 'none',
+                background: masarState === 'speaking'  ? 'var(--masar-signal)'
+                          : masarState === 'listening' ? 'var(--masar-amber)'
+                          : masarState === 'thinking'  ? 'var(--masar-cyan)'
+                          : callActive                 ? 'var(--masar-muted)'
+                          : 'var(--masar-muted)',
+                boxShadow: masarState === 'listening' ? '0 0 0 3px rgba(245,158,11,0.2)'
+                         : masarState === 'speaking'  ? '0 0 0 3px rgba(34,197,94,0.2)'
+                         : 'none',
                 transition: 'all var(--duration-base)',
               }} />
-              <span className="mono-sm" style={{ color: isSpeaking ? 'var(--masar-danger)' : isRecording ? 'var(--masar-success)' : 'var(--masar-muted)' }}>
-                {isSpeaking ? 'Speaking' : isRecording ? 'Listening' : 'Idle'}
+              <span className="mono-sm" style={{
+                color: masarState === 'speaking'  ? 'var(--masar-signal)'
+                     : masarState === 'listening' ? 'var(--masar-amber)'
+                     : masarState === 'thinking'  ? 'var(--masar-cyan)'
+                     : 'var(--masar-muted)',
+              }}>
+                {masarState === 'speaking'  ? 'Speaking'
+               : masarState === 'listening' ? 'Listening'
+               : masarState === 'thinking'  ? 'Thinking'
+               : callActive                 ? 'Standby'
+               : 'Idle'}
               </span>
             </div>
             {/* Active service badge */}
@@ -307,7 +418,7 @@ export default function Workspace() {
         }}>
           <div className="grid-bg" style={{ opacity: 0.12, pointerEvents: 'none' }} />
 
-          {/* Empty state — no turns yet */}
+          {/* Empty state */}
           {turns.length === 0 && (
             <div style={{
               flex: 1, display: 'flex', flexDirection: 'column',
@@ -315,9 +426,9 @@ export default function Workspace() {
               color: 'var(--masar-muted)', gap: '0.5rem',
               minHeight: '200px',
             }}>
-              <span style={{ fontSize: '2rem', opacity: 0.3 }}>🎙</span>
+              <span style={{ fontSize: '2rem', opacity: 0.3 }}>📞</span>
               <span className="mono-sm" style={{ fontFamily: 'Cairo, sans-serif' }}>
-                اضغط على الميكروفون للبدء
+                {callActive ? 'جارٍ الاستماع…' : 'ابدأ المكالمة للتحدث مع مسار'}
               </span>
             </div>
           )}
@@ -333,7 +444,6 @@ export default function Workspace() {
               isStreaming={!!streamingIds[turn.id]}
               solution={solutions[turn.id]}
               isSolving={!!solvingIds[turn.id]}
-              onSolve={() => streamSolve(turn.id, masarResponses[turn.id], techLevel, service.id, setSolutions, setSolvingIds)}
               ttsState={ttsStates[turn.id] ?? 'idle'}
               onPlay={() => playTTS(turn.id, solutions[turn.id])}
               onStop={() => stopTTS(turn.id)}
@@ -341,7 +451,6 @@ export default function Workspace() {
             />
           ))}
 
-          {/* Scroll anchor */}
           <div ref={feedEndRef} />
         </div>
 
@@ -360,38 +469,36 @@ export default function Workspace() {
           <MasarStateIndicator state={masarState} />
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '1.75rem' }}>
-            {/* ── Mic / End-call button ── */}
+
+            {/* ── Call button ── */}
             <div style={{ position: 'relative', width: 88, height: 88, flexShrink: 0 }}>
-              {/* Ripple rings — rendered while recording */}
+              {/* Ripple rings — while listening */}
               {isRecording && [0, 1, 2].map(i => (
-                <span
-                  key={i}
-                  className="mic-ripple"
-                  style={{ animationDelay: `${i * 0.7}s` }}
-                />
+                <span key={i} className="mic-ripple" style={{ animationDelay: `${i * 0.7}s` }} />
               ))}
 
               <button
                 ref={micBtnRef}
-                onClick={() => isRecording ? stopRecording() : startRecording()}
+                onClick={callActive ? endCall : startCall}
+                disabled={callBusy}
                 className={isRecording && !isSpeaking ? 'mic-btn-listening' : ''}
                 style={{
                   position: 'relative',
                   width: 88, height: 88, borderRadius: '50%',
-                  border: isRecording
+                  border: callActive
                     ? '2px solid rgba(239,68,68,0.7)'
                     : '2px solid var(--masar-amber-line)',
-                  background: isRecording
+                  background: callActive
                     ? 'rgba(239,68,68,0.13)'
                     : 'var(--masar-amber-glow)',
-                  cursor: 'pointer',
+                  cursor: callBusy ? 'not-allowed' : 'pointer',
+                  opacity: callBusy ? 0.45 : 1,
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  transition: 'border-color 300ms ease, background 300ms ease',
+                  transition: 'border-color 300ms ease, background 300ms ease, opacity 300ms ease',
                   zIndex: 1,
                 }}
               >
-                {isRecording ? (
-                  /* End-call icon: phone receiver rotated 135° */
+                {callActive ? (
                   <span style={{
                     fontSize: '1.75rem',
                     display: 'inline-block',
@@ -407,35 +514,77 @@ export default function Workspace() {
               </button>
             </div>
 
-            {/* Tech level selector */}
-            <div style={{
-              display: 'flex', background: 'var(--masar-surface)',
-              border: '1px solid var(--masar-border)', borderRadius: '999px',
-              padding: '3px', gap: '2px',
-            }}>
-              {TECH_LEVELS.map(level => (
-                <button key={level} onClick={() => setTechLevel(level)} className="mono-sm"
-                  style={{
-                    background: techLevel === level ? 'var(--masar-amber)' : 'transparent',
-                    border: 'none', color: techLevel === level ? '#080C14' : 'var(--masar-muted)',
-                    padding: '0.375rem 0.875rem', borderRadius: '999px', cursor: 'pointer',
-                    fontWeight: techLevel === level ? 600 : 400, transition: 'all var(--duration-base)',
-                  }}
-                >
-                  {level}
-                </button>
-              ))}
+            {/* Right-side controls stacked vertically */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.625rem' }}>
+
+              {/* Tech level selector */}
+              <div style={{
+                display: 'flex', background: 'var(--masar-surface)',
+                border: '1px solid var(--masar-border)', borderRadius: '999px',
+                padding: '3px', gap: '2px',
+              }}>
+                {TECH_LEVELS.map(level => (
+                  <button key={level} onClick={() => setTechLevel(level)} className="mono-sm"
+                    style={{
+                      background: techLevel === level ? 'var(--masar-amber)' : 'transparent',
+                      border: 'none', color: techLevel === level ? '#080C14' : 'var(--masar-muted)',
+                      padding: '0.375rem 0.875rem', borderRadius: '999px', cursor: 'pointer',
+                      fontWeight: techLevel === level ? 600 : 400, transition: 'all var(--duration-base)',
+                    }}
+                  >
+                    {level}
+                  </button>
+                ))}
+              </div>
+
+              {/* VAD sensitivity selector */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <span className="mono-sm" style={{ color: 'var(--masar-muted)', fontSize: '0.6875rem', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+                  VAD
+                </span>
+                <div style={{
+                  display: 'flex', background: 'var(--masar-surface)',
+                  border: '1px solid var(--masar-border)', borderRadius: '999px',
+                  padding: '2px', gap: '1px',
+                }}>
+                  {['low', 'medium', 'high'].map(level => (
+                    <button key={level} onClick={() => setVadSensitivity(level)} className="mono-sm"
+                      style={{
+                        background: vadSensitivity === level ? 'rgba(245,158,11,0.15)' : 'transparent',
+                        border: vadSensitivity === level ? '1px solid rgba(245,158,11,0.35)' : '1px solid transparent',
+                        color: vadSensitivity === level ? 'var(--masar-amber)' : 'var(--masar-muted)',
+                        padding: '0.25rem 0.625rem', borderRadius: '999px', cursor: 'pointer',
+                        fontSize: '0.6875rem', fontWeight: vadSensitivity === level ? 600 : 400,
+                        transition: 'all var(--duration-base)', textTransform: 'capitalize',
+                      }}
+                    >
+                      {level}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
             </div>
           </div>
 
-          {/* End session */}
-          <button onClick={endSession} className="mono-sm"
-            style={{ background: 'transparent', border: 'none', color: 'var(--masar-muted)', cursor: 'pointer', transition: 'color var(--duration-fast)' }}
-            onMouseEnter={e => e.target.style.color = '#E2E8F0'}
-            onMouseLeave={e => e.target.style.color = 'var(--masar-muted)'}
-          >
-            End session & view summary →
-          </button>
+          {/* Call label + end session */}
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.25rem' }}>
+            <span className="mono-sm" style={{
+              color: callActive ? 'var(--masar-danger)' : 'var(--masar-muted)',
+              fontSize: '0.6875rem', letterSpacing: '0.08em', textTransform: 'uppercase',
+              transition: 'color 300ms',
+            }}>
+              {callActive ? '● Call Active' : 'Press mic to start call'}
+            </span>
+            <button onClick={endSession} className="mono-sm"
+              style={{ background: 'transparent', border: 'none', color: 'var(--masar-muted)', cursor: 'pointer', transition: 'color var(--duration-fast)' }}
+              onMouseEnter={e => e.target.style.color = '#E2E8F0'}
+              onMouseLeave={e => e.target.style.color = 'var(--masar-muted)'}
+            >
+              End session & view summary →
+            </button>
+          </div>
+
         </div>
 
       </main>
@@ -450,13 +599,13 @@ async function streamRefine(turnId, text, techLevel, serviceId, setMasarResponse
   setStreamingIds(prev => ({ ...prev, [turnId]: true }));
 
   try {
-    const res = await fetch(`${import.meta.env.VITE_API_BASE ?? 'http://localhost:8002'}/refine`, {
+    const res = await fetch(`${import.meta.env.VITE_API_BASE ?? 'http://localhost:8000'}/refine`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text, tech_level: techLevel, service_id: serviceId }),
     });
 
-    const reader = res.body.getReader();
+    const reader  = res.body.getReader();
     const decoder = new TextDecoder();
 
     while (true) {
@@ -474,9 +623,7 @@ async function streamRefine(turnId, text, techLevel, serviceId, setMasarResponse
         try {
           const token = JSON.parse(payload);
           setMasarResponses(prev => ({ ...prev, [turnId]: (prev[turnId] ?? '') + token }));
-        } catch {
-          // Partial SSE frame — arrives in next chunk, skip
-        }
+        } catch { /* partial SSE frame */ }
       }
     }
   } catch (err) {
@@ -491,13 +638,13 @@ async function streamSolve(turnId, refinedPrompt, techLevel, serviceId, setSolut
   setSolvingIds(prev => ({ ...prev, [turnId]: true }));
 
   try {
-    const res = await fetch(`${import.meta.env.VITE_API_BASE ?? 'http://localhost:8002'}/solve`, {
+    const res = await fetch(`${import.meta.env.VITE_API_BASE ?? 'http://localhost:8000'}/solve`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ refined_prompt: refinedPrompt, tech_level: techLevel, service_id: serviceId, response_language: 'arabic' }),
     });
 
-    const reader = res.body.getReader();
+    const reader  = res.body.getReader();
     const decoder = new TextDecoder();
 
     while (true) {
@@ -515,9 +662,7 @@ async function streamSolve(turnId, refinedPrompt, techLevel, serviceId, setSolut
         try {
           const token = JSON.parse(payload);
           setSolutions(prev => ({ ...prev, [turnId]: (prev[turnId] ?? '') + token }));
-        } catch {
-          // Partial SSE frame — skip
-        }
+        } catch { /* partial SSE frame */ }
       }
     }
   } catch (err) {
@@ -529,10 +674,9 @@ async function streamSolve(turnId, refinedPrompt, techLevel, serviceId, setSolut
 
 /* ══ Sub-components ═══════════════════════════════════════════════════════ */
 
-// Bar stagger delays (ms) — 5 bars, slightly varied for organic feel
 const WAVEFORM_DELAYS = [0, 140, 80, 220, 40];
 
-function TurnBlock({ turn, error, isGeneral, masarResponse, isStreaming, solution, isSolving, onSolve,
+function TurnBlock({ turn, error, isGeneral, masarResponse, isStreaming, solution, isSolving,
                      ttsState = 'idle', onPlay, onStop, onReplay }) {
   const displayText = turn.isActive
     ? [turn.text, turn.partial].filter(Boolean).join(' ')
@@ -540,17 +684,14 @@ function TurnBlock({ turn, error, isGeneral, masarResponse, isStreaming, solutio
 
   const isEmpty = !displayText;
 
-  // Labels adapt for general vs technical mode
-  const layer3Label    = isGeneral ? 'Masar (Cleaned)'   : 'Masar';
-  const layer4Label    = isGeneral ? 'Response'          : 'Network Solution';
-  const solveBtn       = isGeneral ? 'Get Response →'    : 'Generate Solution →';
-  const layer4Color    = isGeneral ? 'var(--masar-cyan)' : 'var(--masar-success)';
-  const layer4Border   = isGeneral ? 'var(--masar-cyan)' : 'var(--masar-success)';
+  const layer3Label  = isGeneral ? 'Masar (Cleaned)'   : 'Masar';
+  const layer4Label  = isGeneral ? 'Response'          : 'Network Solution';
+  const layer4Color  = isGeneral ? 'var(--masar-cyan)' : 'var(--masar-success)';
+  const layer4Border = isGeneral ? 'var(--masar-cyan)' : 'var(--masar-success)';
 
   return (
     <div style={{ width: '100%', maxWidth: '680px', margin: '0 auto' }}>
 
-      {/* ─ User Speech label ─ */}
       <p className="mono-sm" style={{
         color: 'var(--masar-amber)', marginBottom: '0.5rem',
         letterSpacing: '0.06em', textTransform: 'uppercase', fontSize: '0.6875rem',
@@ -558,7 +699,6 @@ function TurnBlock({ turn, error, isGeneral, masarResponse, isStreaming, solutio
         User Speech
       </p>
 
-      {/* ─ Single utterance box ─ */}
       <div style={{
         background: 'var(--masar-surface)',
         border: '1px solid var(--masar-border)',
@@ -601,7 +741,7 @@ function TurnBlock({ turn, error, isGeneral, masarResponse, isStreaming, solutio
         )}
       </div>
 
-      {/* ─ Masar refined prompt — appears only after mic closes ─ */}
+      {/* Layer 3 output */}
       {!turn.isActive && (
         <div style={{
           background: 'var(--masar-surface)',
@@ -632,30 +772,7 @@ function TurnBlock({ turn, error, isGeneral, masarResponse, isStreaming, solutio
         </div>
       )}
 
-      {/* ─ Action button — shows after Layer 3 finishes ─ */}
-      {!turn.isActive && masarResponse && !isStreaming && solution === undefined && (
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '0.5rem' }}>
-          <button
-            onClick={onSolve}
-            className="mono-sm"
-            style={{
-              background: 'var(--masar-amber-glow)',
-              border: '1px solid var(--masar-amber-line)',
-              color: 'var(--masar-amber)',
-              padding: '0.4rem 1rem',
-              borderRadius: 'var(--radius-md)',
-              cursor: 'pointer',
-              transition: 'opacity var(--duration-fast)',
-            }}
-            onMouseEnter={e => e.target.style.opacity = '0.75'}
-            onMouseLeave={e => e.target.style.opacity = '1'}
-          >
-            {solveBtn}
-          </button>
-        </div>
-      )}
-
-      {/* ─ Layer 4 output ─ */}
+      {/* Layer 4 output */}
       {!turn.isActive && solution !== undefined && (
         <div style={{
           background: 'var(--masar-surface)',
@@ -680,7 +797,7 @@ function TurnBlock({ turn, error, isGeneral, masarResponse, isStreaming, solutio
                 {isSolving && <span className="stream-cursor" style={{ color: layer4Color }}>▌</span>}
               </span>
 
-              {/* ── Speaker controls — active when streaming is done ── */}
+              {/* Speaker controls */}
               <div style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -692,7 +809,6 @@ function TurnBlock({ turn, error, isGeneral, masarResponse, isStreaming, solutio
                 transition: 'opacity 300ms',
                 pointerEvents: isSolving ? 'none' : 'auto',
               }}>
-                {/* Waveform bars */}
                 <div style={{ display: 'flex', alignItems: 'flex-end', gap: '2px', height: 16 }}>
                   {WAVEFORM_DELAYS.map((delay, i) => (
                     <span
@@ -705,7 +821,6 @@ function TurnBlock({ turn, error, isGeneral, masarResponse, isStreaming, solutio
 
                 <div style={{ flex: 1 }} />
 
-                {/* Play / Stop toggle */}
                 <button
                   onClick={() => ttsState === 'playing' ? onStop() : onPlay()}
                   className="mono-sm"
@@ -722,15 +837,10 @@ function TurnBlock({ turn, error, isGeneral, masarResponse, isStreaming, solutio
                   onMouseEnter={e => { if (ttsState === 'idle') e.currentTarget.style.borderColor = 'rgba(34,211,238,0.35)'; }}
                   onMouseLeave={e => { if (ttsState === 'idle') e.currentTarget.style.borderColor = 'var(--masar-border)'; }}
                 >
-                  <span>
-                    {ttsState === 'loading' ? '…' : ttsState === 'playing' ? '⏹' : '🔊'}
-                  </span>
-                  <span>
-                    {ttsState === 'loading' ? 'Loading…' : ttsState === 'playing' ? 'Stop' : 'Play Response'}
-                  </span>
+                  <span>{ttsState === 'loading' ? '…' : ttsState === 'playing' ? '⏹' : '🔊'}</span>
+                  <span>{ttsState === 'loading' ? 'Loading…' : ttsState === 'playing' ? 'Stop' : 'Play Response'}</span>
                 </button>
 
-                {/* Replay button */}
                 <button
                   onClick={onReplay}
                   title="Replay"
@@ -766,90 +876,41 @@ function TurnBlock({ turn, error, isGeneral, masarResponse, isStreaming, solutio
 
 const STATE_CONFIG = {
   idle: {
-    color:  'var(--masar-muted)',
-    border: 'var(--masar-border)',
-    bg:     'transparent',
-    dot:    'var(--masar-muted)',
-    dotClass: '',
-    icon:   '◎',
-    label:  'Idle',
+    color: 'var(--masar-muted)', border: 'var(--masar-border)', bg: 'transparent',
+    dot: 'var(--masar-muted)', dotClass: '', icon: '◎', label: 'Idle',
   },
   listening: {
-    color:  'var(--masar-amber)',
-    border: 'rgba(245,158,11,0.4)',
-    bg:     'rgba(245,158,11,0.06)',
-    dot:    'var(--masar-amber)',
-    dotClass: 'state-dot-listening',
-    icon:   '🎙',
-    label:  'Listening',
+    color: 'var(--masar-amber)', border: 'rgba(245,158,11,0.4)', bg: 'rgba(245,158,11,0.06)',
+    dot: 'var(--masar-amber)', dotClass: 'state-dot-listening', icon: '🎙', label: 'Listening',
   },
   thinking: {
-    color:  'var(--masar-cyan)',
-    border: 'rgba(34,211,238,0.4)',
-    bg:     'rgba(34,211,238,0.06)',
-    dot:    'var(--masar-cyan)',
-    dotClass: 'state-dot-thinking',
-    icon:   '⚙',
-    label:  'Thinking',
+    color: 'var(--masar-cyan)', border: 'rgba(34,211,238,0.4)', bg: 'rgba(34,211,238,0.06)',
+    dot: 'var(--masar-cyan)', dotClass: 'state-dot-thinking', icon: '⚙', label: 'Thinking',
   },
   speaking: {
-    color:  'var(--masar-signal)',
-    border: 'rgba(34,197,94,0.4)',
-    bg:     'rgba(34,197,94,0.06)',
-    dot:    'var(--masar-signal)',
-    dotClass: 'state-dot-speaking',
-    icon:   '🔊',
-    label:  'Speaking',
+    color: 'var(--masar-signal)', border: 'rgba(34,197,94,0.4)', bg: 'rgba(34,197,94,0.06)',
+    dot: 'var(--masar-signal)', dotClass: 'state-dot-speaking', icon: '🔊', label: 'Speaking',
   },
 };
 
 function MasarStateIndicator({ state }) {
   const cfg = STATE_CONFIG[state] ?? STATE_CONFIG.idle;
-
   return (
     <div style={{
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      gap: '0.625rem',
-      padding: '0.5rem 1.5rem',
-      borderRadius: '999px',
-      border: `1px solid ${cfg.border}`,
-      background: cfg.bg,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      gap: '0.625rem', padding: '0.5rem 1.5rem', borderRadius: '999px',
+      border: `1px solid ${cfg.border}`, background: cfg.bg,
       transition: 'border-color 400ms ease, background 400ms ease',
       minWidth: '180px',
     }}>
-      {/* Pulse dot */}
-      <span
-        className={cfg.dotClass}
-        style={{
-          display: 'inline-block',
-          width: 8,
-          height: 8,
-          borderRadius: '50%',
-          background: cfg.dot,
-          flexShrink: 0,
-          transition: 'background 400ms ease',
-        }}
-      />
-      {/* Icon */}
-      <span style={{
-        fontSize: '0.875rem',
-        lineHeight: 1,
-        filter: state === 'idle' ? 'grayscale(1) opacity(0.4)' : 'none',
-        transition: 'filter 400ms ease',
-      }}>
+      <span className={cfg.dotClass} style={{
+        display: 'inline-block', width: 8, height: 8, borderRadius: '50%',
+        background: cfg.dot, flexShrink: 0, transition: 'background 400ms ease',
+      }} />
+      <span style={{ fontSize: '0.875rem', lineHeight: 1, filter: state === 'idle' ? 'grayscale(1) opacity(0.4)' : 'none', transition: 'filter 400ms ease' }}>
         {cfg.icon}
       </span>
-      {/* Label */}
-      <span style={{
-        fontFamily: 'var(--font-mono)',
-        fontSize: '0.75rem',
-        letterSpacing: '0.1em',
-        textTransform: 'uppercase',
-        color: cfg.color,
-        transition: 'color 400ms ease',
-      }}>
+      <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem', letterSpacing: '0.1em', textTransform: 'uppercase', color: cfg.color, transition: 'color 400ms ease' }}>
         {cfg.label}
       </span>
     </div>

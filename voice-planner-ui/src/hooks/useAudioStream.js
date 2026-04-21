@@ -20,7 +20,7 @@
 
 import { useState, useRef, useCallback } from 'react';
 
-const BACKEND_WS    = `${import.meta.env.VITE_WS_BASE ?? 'ws://localhost:8002'}/ws/audio`;
+const BACKEND_WS    = `${import.meta.env.VITE_WS_BASE ?? 'ws://localhost:8000'}/ws/audio`;
 const VAD_THRESHOLD = 18;   // 0–255 — raise if background noise triggers false positives
 const VAD_SMOOTHING = 0.6;  // AnalyserNode smoothingTimeConstant
 const LEVEL_MAX     = 70;   // amplitude considered "loud speech" — normalises to 1.0

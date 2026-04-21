@@ -56,7 +56,8 @@ anthropic = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 # Set ELEVENLABS_VOICE_ID in .env to override; default is a multilingual voice.
 _ELEVENLABS_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 elevenlabs_client = ElevenLabsClient(api_key=_ELEVENLABS_KEY) if _ELEVENLABS_KEY else None
-DEFAULT_VOICE_ID  = os.getenv("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")  # Sarah — eleven_multilingual_v2
+DEFAULT_VOICE_ID  = os.getenv("ELEVENLABS_VOICE_ID", "UR972wNGq3zluze0LoIp")
+logger.info("ElevenLabs DEFAULT_VOICE_ID at startup: %s", DEFAULT_VOICE_ID)
 
 # ── System prompts ────────────────────────────────────────────────────────────
 
@@ -208,30 +209,76 @@ async def refine(req: RefineRequest) -> StreamingResponse:
 
 # ── Layer 4: AI Reasoning Core ────────────────────────────────────────────────
 
-PLANNING_SYSTEM_PROMPT = """You are the AI Reasoning Core of Masar (مسار), an AI network planning assistant for telecom engineers.
+_STYLE = """
+قواعد الإجابة (إلزامية):
+- أجب حصراً باللغة العربية الفصحى — ولا تستخدم الإنجليزية أبداً تحت أي ظرف (الاختصارات التقنية مثل IEEE وOSPF وDWDM مسموح بها)
+- نقاط مختصرة فقط — بدون فقرات أو عناوين
+- 6 إلى 8 أسطر كحد أقصى
+- ابدأ فوراً بالحل أو التوصية المباشرة — بدون مقدمات
+- كل سطر يجب أن يحمل قيمة تقنية: مواصفات، أرقام، معدات، أو مراجع معايير
+- فضّل الأرقام على الأوصاف العامة (مثال: "23 GHz، 28 dBm Tx" لا "تردد مناسب")
+- لا خاتمة ولا ملخص في النهاية
 
-Your job: take a professional network engineering requirement and generate a complete, actionable technical solution.
+تعديل الكثافة حسب المستوى:
+- Beginner: اشرح كل مصطلح باختصار، تجنب المعادلات المعقدة، استخدم أمثلة عملية
+- Professional: مصطلحات هندسية كاملة، أشر للمعايير، اذكر الأرقام والمعادلات الأساسية
+- Expert: أقصى كثافة تقنية، أشر لأرقام إصدارات المعايير، افترض خبرة كاملة"""
 
-Output rules:
-- Return ONLY the technical solution — no preamble, no "Here is...", no repeating the input
-- Use IEEE / ITU-T / 3GPP standard terminology
-- Be specific: include topology recommendations, equipment types, capacity budgets, redundancy strategies, and relevant standards references
-- Structure your response with clear sections where appropriate
+_REJECT = "إذا كان السؤال خارج نطاق هذه الخدمة، رد بجملة واحدة مهذبة بالعربية توجّه المستخدم للخدمة المناسبة، ولا تجب على السؤال."
 
-Adjust output depth by tech level:
-- Beginner: شرح مبسط بدون معادلات، اشرح كل مصطلح تستخدمه
-- Professional: مصطلحات هندسية كاملة، أشر للمعايير المعتمدة، اذكر المعادلات الأساسية
-- Expert: لغة تقنية كثيفة، أشر لأرقام إصدارات 3GPP، افترض خبرة كاملة، أقصى عمق تقني"""
+SERVICE_PROMPTS = {
+    "fiber": f"""أنت متخصص في تصميم شبكات الألياف الضوئية ضمن نظام مسار (Masar).
 
-GENERAL_PLANNING_SYSTEM_PROMPT = """أنت مسار (Masar)، مساعد ذكاء اصطناعي ودود ومعرفي.
+نطاق عملك: تصميم مسارات backbone الألياف، حسابات OSNR وميزانية الخسارة، فترات اللحام، أنواع الألياف (SMF/MMF/G.652/G.655)، تخطيط OTN وDWDM، معايير ITU-T G-series.
+{_REJECT}
+{_STYLE}""",
 
-يمكنك المساعدة في أي موضوع — هندسة، علوم، رياضيات، تاريخ، ثقافة، كتابة إبداعية، تحليل، أسئلة يومية، أو مجرد حديث عادي.
+    "topology": f"""أنت متخصص في تصميم طبولوجيا الشبكات ضمن نظام مسار (Masar).
 
-كن مفيداً حقاً، مدروساً، ومباشراً. تكيّف مع أسلوب المحادثة بشكل طبيعي — عامي عند الحاجة، وتفصيلي عند الطلب. لا قيود على المواضيع."""
+نطاق عملك: تصميم طبولوجيا Ring وMesh وStar وHybrid، معمارية Layer 2/3، مسارات التكرار والـ redundancy، معايير اختيار الطبولوجيا، IEEE 802.x.
+{_REJECT}
+{_STYLE}""",
 
-LANGUAGE_INSTRUCTION = {
-    "arabic":  "IMPORTANT: Respond entirely in Modern Standard Arabic (فصحى). Keep technical acronyms in English (IEEE, 3GPP, MPLS, IP, etc.) but write all explanations, headings, and prose in Arabic.",
-    "english": "Respond in English.",
+    "ip": f"""أنت متخصص في تخطيط مخططات IP ضمن نظام مسار (Masar).
+
+نطاق عملك: عنونة IP، تقسيم الشبكات (VLSM/CIDR)، تخطيط IPv4/IPv6، اختيار بروتوكول التوجيه (OSPF/BGP/EIGRP)، خطط تخصيص العناوين، RFC 1918.
+{_REJECT}
+{_STYLE}""",
+
+    "monitoring": f"""أنت متخصص في مراقبة الشبكات ضمن نظام مسار (Masar).
+
+نطاق عملك: SNMP v2c/v3، NetFlow/IPFIX، Syslog، التنبيهات الفورية، أدوات المراقبة (Zabbix/PRTG/Nagios)، لوحات KPI، إدارة الأعطال، ITU-T M.3000.
+{_REJECT}
+{_STYLE}""",
+
+    "capacity": f"""أنت متخصص في تخطيط السعة الشبكية ضمن نظام مسار (Masar).
+
+نطاق عملك: تقدير النطاق الترددي، توقع نمو الحركة، حسابات الإنتاجية، استخدام الروابط، تخطيط الترقية، نماذج حركة Erlang، ITU-T E.501.
+{_REJECT}
+{_STYLE}""",
+
+    "redundancy": f"""أنت متخصص في تصميم التكرار وعالي التوافر ضمن نظام مسار (Masar).
+
+نطاق عملك: مسارات الـ failover، Hot/Warm/Cold Standby، تخطيط STP/RSTP (IEEE 802.1D/w)، VRRP/HSRP، تجميع الروابط (LACP/802.3ad)، تصميم HA بنسبة 99.999%.
+{_REJECT}
+{_STYLE}""",
+
+    "security": f"""أنت متخصص في أمن الشبكات ضمن نظام مسار (Masar).
+
+نطاق عملك: تقسيم مناطق الجدار الناري، قوائم ACL، معمارية DMZ، تصميم VPN (IPSec/SSL)، وضع IDS/IPS، تجزئة الشبكة، معايير ISO 27001 وNIST SP 800-53.
+{_REJECT}
+{_STYLE}""",
+
+    "qos": f"""أنت متخصص في تصميم جودة الخدمة (QoS) ضمن نظام مسار (Masar).
+
+نطاق عملك: تشكيل الحركة، وسم DSCP (RFC 2474)، قوائم الأولوية (PQ/WFQ/CBWFQ)، سياسات QoS، ضمانات النطاق الترددي، تحسين الكمون والـ jitter، CoS IEEE 802.1p.
+{_REJECT}
+{_STYLE}""",
+
+    "general": f"""أنت مسار (Masar)، مساعد هندسة شبكات متكامل.
+
+نطاق عملك: أي موضوع في هندسة الشبكات والاتصالات — لا قيود على الأسئلة الهندسية.
+{_STYLE}""",
 }
 
 
@@ -250,16 +297,14 @@ async def solve(req: SolveRequest) -> StreamingResponse:
     SSE format:  data: <json-encoded token>\\n\\n
                  data: [DONE]\\n\\n
     """
-    base_prompt     = GENERAL_PLANNING_SYSTEM_PROMPT if req.service_id == "general" else PLANNING_SYSTEM_PROMPT
-    lang_instruction = LANGUAGE_INSTRUCTION.get(req.response_language, LANGUAGE_INSTRUCTION["arabic"])
-    planning_prompt  = f"{base_prompt}\n\n{lang_instruction}"
-    full_prompt      = f"Tech level: {req.tech_level}\n\nRequest:\n{req.refined_prompt}"
+    planning_prompt = SERVICE_PROMPTS.get(req.service_id, SERVICE_PROMPTS["general"])
+    full_prompt     = f"Tech level: {req.tech_level}\n\nRequest:\n{req.refined_prompt}"
 
     async def event_stream():
         try:
             async with anthropic.messages.stream(
                 model="claude-haiku-4-5-20251001",
-                max_tokens=2048,
+                max_tokens=512,
                 system=planning_prompt,
                 messages=[{"role": "user", "content": full_prompt}],
             ) as stream:
@@ -303,8 +348,9 @@ async def tts(req: TTSRequest) -> Response:
             headers={"X-TTS-Error": "ELEVENLABS_API_KEY not configured"},
         )
 
-    voice = req.voice_id or DEFAULT_VOICE_ID
+    voice = req.voice_id or DEFAULT_VOICE_ID or "UR972wNGq3zluze0LoIp"
     loop  = asyncio.get_event_loop()
+    logger.info("TTS request — voice_id: %s", voice)
 
     def _synthesize() -> bytes:
         chunks = elevenlabs_client.text_to_speech.convert(
