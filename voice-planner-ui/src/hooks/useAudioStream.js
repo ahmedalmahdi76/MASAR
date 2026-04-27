@@ -20,10 +20,11 @@
 
 import { useState, useRef, useCallback } from 'react';
 
-const BACKEND_WS    = `${import.meta.env.VITE_WS_BASE ?? 'ws://localhost:8000'}/ws/audio`;
-const VAD_THRESHOLD = 18;   // 0–255 — raise if background noise triggers false positives
-const VAD_SMOOTHING = 0.6;  // AnalyserNode smoothingTimeConstant
-const LEVEL_MAX     = 70;   // amplitude considered "loud speech" — normalises to 1.0
+const API_BASE   = import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000';
+const BACKEND_WS = `${API_BASE.replace(/^http/, 'ws')}/ws/audio`;
+const VAD_THRESHOLD = 0.015; // RMS threshold for isSpeaking
+const VAD_SMOOTHING = 0.6;   // AnalyserNode smoothingTimeConstant
+const LEVEL_MAX     = 0.3;   // RMS considered loud speech — normalises to 1.0
 
 export function useAudioStream() {
   const [turns, setTurns]             = useState([]);
@@ -97,38 +98,46 @@ export function useAudioStream() {
       };
 
       // ── Voice Activity Detection ──────────────────────────────────────
-      // AnalyserNode reads frequency energy on every animation frame.
-      // When average amplitude crosses VAD_THRESHOLD, isSpeaking flips true.
+      // AnalyserNode is placed IN-SERIES (source → analyser → worklet → destination)
+      // so Chrome's audio graph optimizer keeps it active. A dead-end analyser
+      // branch gets skipped and always returns zero.
       const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 256;
+      analyser.fftSize = 2048;
       analyser.smoothingTimeConstant = VAD_SMOOTHING;
       analyserRef.current = analyser;
-      const vadBuffer = new Uint8Array(analyser.frequencyBinCount);
+      const timeDomainBuffer = new Uint8Array(analyser.fftSize);
 
       const detectVoice = () => {
         if (!analyserRef.current) return;
-        analyserRef.current.getByteFrequencyData(vadBuffer);
-        const avg = vadBuffer.reduce((sum, v) => sum + v, 0) / vadBuffer.length;
-        // Normalise to 0–1: below threshold = 0, LEVEL_MAX and above = 1
-        audioLevelRef.current = Math.min(1, Math.max(0, (avg - VAD_THRESHOLD) / LEVEL_MAX));
-        setIsSpeaking(avg > VAD_THRESHOLD);
+        analyserRef.current.getByteTimeDomainData(timeDomainBuffer);
+        let sumSq = 0;
+        for (let i = 0; i < timeDomainBuffer.length; i++) {
+          const s = (timeDomainBuffer[i] - 128) / 128; // normalise to -1..1
+          sumSq += s * s;
+        }
+        const rms = Math.sqrt(sumSq / timeDomainBuffer.length);
+        console.log('[VAD rAF] rms=', rms.toFixed(4));
+        audioLevelRef.current = Math.min(1, rms / LEVEL_MAX);
+        setIsSpeaking(rms > VAD_THRESHOLD);
         rafRef.current = requestAnimationFrame(detectVoice);
       };
       rafRef.current = requestAnimationFrame(detectVoice);
 
-      // Connect: mic → analyser (VAD) + worklet (PCM stream) → destination
+      // Correct order: source → analyser (in-path) → workletNode → destination
       const source = audioCtx.createMediaStreamSource(stream);
       source.connect(analyser);
-      source.connect(workletNode);
+      analyser.connect(workletNode);
       workletNode.connect(audioCtx.destination);
 
       setIsRecording(true);
     } catch (err) {
+      console.error('[useAudioStream] startRecording failed:', err);
       setError(err.message || 'Failed to start recording');
       setTurns(prev => prev.filter(t => t.id !== turnId));
       activeTurnIdRef.current = null;
       streamRef.current?.getTracks().forEach(t => t.stop());
-      audioCtxRef.current?.close();
+      if (audioCtxRef.current?.state !== 'closed') audioCtxRef.current?.close();
+      audioCtxRef.current = null;
     }
   }, []);
 
@@ -169,6 +178,7 @@ export function useAudioStream() {
   }, []);
 
   const clearTurns = useCallback(() => setTurns([]), []);
+  const removeTurn = useCallback((id) => setTurns(prev => prev.filter(t => t.id !== id)), []);
 
-  return { turns, isRecording, isSpeaking, audioLevelRef, error, startRecording, stopRecording, clearTurns };
+  return { turns, isRecording, isSpeaking, audioLevelRef, error, startRecording, stopRecording, clearTurns, removeTurn };
 }

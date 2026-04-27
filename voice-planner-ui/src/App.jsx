@@ -4,6 +4,7 @@ import AuthPage        from './pages/AuthPage';
 import ServiceSelect   from './pages/ServiceSelect';
 import Workspace       from './pages/Workspace';
 import SessionSummary  from './pages/SessionSummary';
+import Settings        from './pages/Settings';
 
 /*
  * MASAR مسار — Router Engine
@@ -61,6 +62,15 @@ export default function App() {
           element={
             <ProtectedRoute>
               <SessionSummary />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/settings"
+          element={
+            <ProtectedRoute>
+              <Settings />
             </ProtectedRoute>
           }
         />

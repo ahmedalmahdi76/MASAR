@@ -12,7 +12,7 @@ import { useState, useRef } from 'react';
  *              drives the MASAR state indicator's "Speaking" state.
  */
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
+const API_BASE = import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000';
 const TTS_URL  = `${API_BASE}/tts`;
 
 export function useTTS() {

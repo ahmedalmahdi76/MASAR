@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "node -e \"const {execSync}=require('child_process');try{execSync('netstat -ano | findstr :3000',{stdio:'pipe'}).toString().match(/\\d+$/gm)?.forEach(p=>execSync('taskkill /F /PID '+p,{stdio:'ignore'}))}catch(e){}\" && vite",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview"

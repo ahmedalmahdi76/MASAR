@@ -11,12 +11,12 @@ import { useTTS } from '../hooks/useTTS';
  * Turns stack vertically in a scrollable column.
  */
 
-const TECH_LEVELS = ['Beginner', 'Professional', 'Expert'];
 
-// VAD silence thresholds — audioLevelRef is 0.0–1.0 (0 = below noise floor)
-const VAD_THRESHOLDS = { low: 0.05, medium: 0.02, high: 0.01 };
-const VAD_SILENCE_MS  = 1500;  // ms of continuous silence before turn closes
-const VAD_MIN_SPEECH  = 500;   // ms of speech required before VAD can trigger
+// VAD silence thresholds — audioLevelRef is 0.0–1.0 (0 = below noise floor, VAD_THRESHOLD=30)
+// At noise floor 30 and LEVEL_MAX 70: avg=40 → level=0.14, avg=50 → level=0.29, avg=70 → level=0.57
+const VAD_THRESHOLDS = { low: 0.20, medium: 0.10, high: 0.05 };
+const VAD_SILENCE_MS  = 4000;  // ms of continuous silence before turn closes
+const VAD_MIN_SPEECH  = 600;   // ms of speech required before VAD can trigger
 
 // Default fallback service if user lands directly on /workspace
 const DEFAULT_SERVICE = {
@@ -33,8 +33,8 @@ export default function Workspace() {
   const service    = location.state?.service ?? DEFAULT_SERVICE;
 
   const [sidebarOpen,    setSidebarOpen]    = useState(true);
-  const [techLevel,      setTechLevel]      = useState('Professional');
-  const [vadSensitivity, setVadSensitivity] = useState('medium');
+  const [techLevel]      = useState(() => localStorage.getItem('masar_tech_level') ?? 'Professional');
+  const [vadSensitivity] = useState(() => localStorage.getItem('masar_vad')        ?? 'medium');
   const [callActive,     setCallActive]     = useState(false);
   const [sessions,       setSessions]       = useState(() => {
     try { return JSON.parse(localStorage.getItem('masar_sessions') || '[]'); }
@@ -46,7 +46,7 @@ export default function Workspace() {
   const startTimeRef  = useRef(Date.now());
   const prevStateRef  = useRef('idle'); // tracks previous masarState for restart logic
 
-  const { turns, isRecording, isSpeaking, audioLevelRef, error, startRecording, stopRecording, clearTurns } = useAudioStream();
+  const { turns, isRecording, isSpeaking, audioLevelRef, error, startRecording, stopRecording, clearTurns, removeTurn } = useAudioStream();
 
   // masarResponses:  { [turnId]: string } — tokens streamed from /refine (Layer 3)
   // streamingIds:    { [turnId]: true }  — present while Layer 3 SSE stream is open
@@ -84,12 +84,24 @@ export default function Workspace() {
     : isThinking                    ? 'thinking'
     : 'idle';
 
+  // If startRecording fails (e.g. WebSocket error), deactivate the call so UI doesn't get stuck
+  useEffect(() => {
+    if (error && callActive && !isRecording) {
+      setCallActive(false);
+    }
+  }, [error]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Trigger refinement whenever a turn closes with captured text
   useEffect(() => {
     const toRefine = turns.filter(t => !t.isActive && t.text && masarResponses[t.id] === undefined);
-    toRefine.forEach(turn =>
-      streamRefine(turn.id, turn.text, techLevel, service.id, setMasarResponses, setStreamingIds)
-    );
+    toRefine.forEach(turn => {
+      const wordCount = turn.text.trim().split(/\s+/).filter(Boolean).length;
+      if (wordCount < 5) {
+        removeTurn(turn.id);
+        return;
+      }
+      streamRefine(turn.id, turn.text, techLevel, service.id, setMasarResponses, setStreamingIds);
+    });
   }, [turns]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-solve: fire Layer 4 as soon as Layer 3 finishes (replaces manual button)
@@ -341,7 +353,7 @@ export default function Workspace() {
           </div>
 
           <div style={{ padding: '0.75rem', borderTop: '1px solid var(--masar-border)' }}>
-            <SidebarRow icon="⚙" label="Settings" />
+            <SidebarRow icon="⚙" label="Settings" onClick={() => navigate('/settings')} />
           </div>
 
         </div>
@@ -514,57 +526,6 @@ export default function Workspace() {
               </button>
             </div>
 
-            {/* Right-side controls stacked vertically */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.625rem' }}>
-
-              {/* Tech level selector */}
-              <div style={{
-                display: 'flex', background: 'var(--masar-surface)',
-                border: '1px solid var(--masar-border)', borderRadius: '999px',
-                padding: '3px', gap: '2px',
-              }}>
-                {TECH_LEVELS.map(level => (
-                  <button key={level} onClick={() => setTechLevel(level)} className="mono-sm"
-                    style={{
-                      background: techLevel === level ? 'var(--masar-amber)' : 'transparent',
-                      border: 'none', color: techLevel === level ? '#080C14' : 'var(--masar-muted)',
-                      padding: '0.375rem 0.875rem', borderRadius: '999px', cursor: 'pointer',
-                      fontWeight: techLevel === level ? 600 : 400, transition: 'all var(--duration-base)',
-                    }}
-                  >
-                    {level}
-                  </button>
-                ))}
-              </div>
-
-              {/* VAD sensitivity selector */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <span className="mono-sm" style={{ color: 'var(--masar-muted)', fontSize: '0.6875rem', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-                  VAD
-                </span>
-                <div style={{
-                  display: 'flex', background: 'var(--masar-surface)',
-                  border: '1px solid var(--masar-border)', borderRadius: '999px',
-                  padding: '2px', gap: '1px',
-                }}>
-                  {['low', 'medium', 'high'].map(level => (
-                    <button key={level} onClick={() => setVadSensitivity(level)} className="mono-sm"
-                      style={{
-                        background: vadSensitivity === level ? 'rgba(245,158,11,0.15)' : 'transparent',
-                        border: vadSensitivity === level ? '1px solid rgba(245,158,11,0.35)' : '1px solid transparent',
-                        color: vadSensitivity === level ? 'var(--masar-amber)' : 'var(--masar-muted)',
-                        padding: '0.25rem 0.625rem', borderRadius: '999px', cursor: 'pointer',
-                        fontSize: '0.6875rem', fontWeight: vadSensitivity === level ? 600 : 400,
-                        transition: 'all var(--duration-base)', textTransform: 'capitalize',
-                      }}
-                    >
-                      {level}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-            </div>
           </div>
 
           {/* Call label + end session */}
@@ -599,7 +560,7 @@ async function streamRefine(turnId, text, techLevel, serviceId, setMasarResponse
   setStreamingIds(prev => ({ ...prev, [turnId]: true }));
 
   try {
-    const res = await fetch(`${import.meta.env.VITE_API_BASE ?? 'http://localhost:8000'}/refine`, {
+    const res = await fetch(`${import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000'}/refine`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text, tech_level: techLevel, service_id: serviceId }),
@@ -638,7 +599,7 @@ async function streamSolve(turnId, refinedPrompt, techLevel, serviceId, setSolut
   setSolvingIds(prev => ({ ...prev, [turnId]: true }));
 
   try {
-    const res = await fetch(`${import.meta.env.VITE_API_BASE ?? 'http://localhost:8000'}/solve`, {
+    const res = await fetch(`${import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000'}/solve`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ refined_prompt: refinedPrompt, tech_level: techLevel, service_id: serviceId, response_language: 'arabic' }),
@@ -931,9 +892,9 @@ function SidebarIconBtn({ children, onClick, title }) {
   );
 }
 
-function SidebarRow({ icon, label }) {
+function SidebarRow({ icon, label, onClick }) {
   return (
-    <div style={{
+    <div onClick={onClick} style={{
       display: 'flex', alignItems: 'center', gap: '0.625rem',
       padding: '0.5rem 0.75rem', borderRadius: 'var(--radius-md)',
       cursor: 'pointer', transition: 'background var(--duration-fast)',
