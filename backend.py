@@ -44,7 +44,12 @@ app.add_middleware(
 
 # Deepgram
 _dg_config = DeepgramClientOptions(options={"keepalive": "true"})
-deepgram = DeepgramClient(os.getenv("DEEPGRAM_API_KEY"), _dg_config)
+_dg_key = os.getenv("DEEPGRAM_API_KEY", "")
+if _dg_key:
+    logger.info("Deepgram API key loaded: %s... (len=%d)", _dg_key[:8], len(_dg_key))
+else:
+    logger.error("Deepgram API key is NOT set — check .env")
+deepgram = DeepgramClient(_dg_key, _dg_config)
 
 # Gemini (new google-genai SDK — properly async)
 gemini = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
@@ -107,6 +112,8 @@ async def audio_stream(websocket: WebSocket, sample_rate: int = 16000) -> None:
 
     dg_connection = deepgram.listen.asyncwebsocket.v("1")
     dg_connection.on(LiveTranscriptionEvents.Transcript, on_transcript)
+    dg_connection.on(LiveTranscriptionEvents.Error,
+        lambda conn, error, **kw: logger.error("Deepgram stream error event: %s", error))
 
     options = LiveOptions(
         model="nova-3",
@@ -118,9 +125,26 @@ async def audio_stream(websocket: WebSocket, sample_rate: int = 16000) -> None:
         interim_results=True,
     )
 
-    if not await dg_connection.start(options):
+    logger.info(
+        "Starting Deepgram — model=%s  lang=%s  encoding=%s  sr=%s  interim=%s",
+        options.model, options.language, options.encoding, options.sample_rate, options.interim_results,
+    )
+
+    try:
+        started = await dg_connection.start(options)
+    except Exception as exc:
+        logger.error("dg_connection.start() raised an exception: %s", exc)
+        started = False
+
+    if not started:
+        logger.error(
+            "Deepgram refused to start — model=%s  lang=%s  encoding=%s  sr=%s",
+            options.model, options.language, options.encoding, sample_rate,
+        )
         await websocket.close(code=1011, reason="Deepgram connection failed")
         return
+
+    logger.info("Deepgram streaming session open — waiting for audio")
 
     try:
         while True:

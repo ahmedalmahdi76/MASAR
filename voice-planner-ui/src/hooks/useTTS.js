@@ -107,5 +107,5 @@ export function useTTS() {
     s => s === 'loading' || s === 'playing'
   );
 
-  return { ttsStates, play, stop, replay, isSpeaking };
+  return { ttsStates, play, stop, replay, isSpeaking, audioRef };
 }

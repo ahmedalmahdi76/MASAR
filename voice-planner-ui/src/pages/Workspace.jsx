@@ -3,22 +3,10 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { useAudioStream } from '../hooks/useAudioStream';
 import { useTTS } from '../hooks/useTTS';
 
-/*
- * Workspace — The Cockpit
- * Layout: sidebar | scrollable turn feed | fixed bottom controls
- *
- * Each mic session = one TurnBlock (User Speech bubbles + Masar answer below).
- * Turns stack vertically in a scrollable column.
- */
-
-
-// VAD silence thresholds — audioLevelRef is 0.0–1.0 (0 = below noise floor, VAD_THRESHOLD=30)
-// At noise floor 30 and LEVEL_MAX 70: avg=40 → level=0.14, avg=50 → level=0.29, avg=70 → level=0.57
 const VAD_THRESHOLDS = { low: 0.20, medium: 0.10, high: 0.05 };
-const VAD_SILENCE_MS  = 4000;  // ms of continuous silence before turn closes
-const VAD_MIN_SPEECH  = 600;   // ms of speech required before VAD can trigger
+const VAD_SILENCE_MS = 4000;
+const VAD_MIN_SPEECH = 600;
 
-// Default fallback service if user lands directly on /workspace
 const DEFAULT_SERVICE = {
   id: 'fiber',
   label: 'Fiber Optic Routing',
@@ -27,212 +15,334 @@ const DEFAULT_SERVICE = {
   icon: '◈',
 };
 
-export default function Workspace() {
-  const navigate   = useNavigate();
-  const location   = useLocation();
-  const service    = location.state?.service ?? DEFAULT_SERVICE;
+// Wave colors per state: [r, g, b, alpha 0-1]
+const STATE_COLORS = {
+  idle:      { w1: [245, 158,  11, 0.12], w2: [124,  58, 237, 0.08] },
+  listening: { w1: [245, 158,  11, 1.00], w2: [124,  58, 237, 0.85] },
+  thinking:  { w1: [ 34, 211, 238, 1.00], w2: [124,  58, 237, 0.85] },
+  speaking:  { w1: [ 34, 211, 238, 1.00], w2: [ 59, 130, 246, 0.85] },
+};
 
-  const [sidebarOpen,    setSidebarOpen]    = useState(true);
+function buildDotGrid(W, H) {
+  const off = document.createElement('canvas');
+  off.width  = W;
+  off.height = H;
+  const ctx  = off.getContext('2d');
+  const spacing = 28;
+  ctx.fillStyle = 'rgba(13,148,136,0.10)';
+  for (let x = spacing / 2; x < W; x += spacing) {
+    for (let y = spacing / 2; y < H; y += spacing) {
+      ctx.beginPath();
+      ctx.arc(x, y, 1, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  return off;
+}
+
+function drawWave(ctx, W, H, baseline, amp, phase, color, wavelength) {
+  const [r, g, b, a] = color;
+  if (a < 0.005) return;
+
+  const pts = [];
+  for (let x = 0; x <= W; x += 3) {
+    pts.push([x, baseline + amp * Math.sin((2 * Math.PI * x / wavelength) + phase)]);
+  }
+
+  // Glow stroke
+  ctx.beginPath();
+  pts.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
+  ctx.strokeStyle = `rgba(${r},${g},${b},${a})`;
+  ctx.lineWidth   = 2.5;
+  ctx.shadowBlur  = 14 + amp * 0.05;
+  ctx.shadowColor = `rgba(${r},${g},${b},${Math.min(1, a * 0.65)})`;
+  ctx.stroke();
+  ctx.shadowBlur  = 0;
+
+  // Area fill (gradient around baseline)
+  const grad = ctx.createLinearGradient(0, baseline - amp - 20, 0, baseline + amp + 20);
+  grad.addColorStop(0,    `rgba(${r},${g},${b},0)`);
+  grad.addColorStop(0.45, `rgba(${r},${g},${b},${Math.min(1, a * 0.16)})`);
+  grad.addColorStop(1,    `rgba(${r},${g},${b},0)`);
+  ctx.beginPath();
+  pts.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
+  ctx.lineTo(W, baseline);
+  ctx.lineTo(0, baseline);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Reflection below baseline at 20% alpha
+  ctx.beginPath();
+  pts.forEach(([x, y], i) => {
+    const ry = baseline + (baseline - y);
+    if (i === 0) ctx.moveTo(x, ry); else ctx.lineTo(x, ry);
+  });
+  ctx.strokeStyle = `rgba(${r},${g},${b},${Math.min(1, a * 0.20)})`;
+  ctx.lineWidth   = 1.5;
+  ctx.shadowBlur  = 6;
+  ctx.shadowColor = `rgba(${r},${g},${b},${Math.min(1, a * 0.08)})`;
+  ctx.stroke();
+  ctx.shadowBlur  = 0;
+}
+
+export default function Workspace() {
+  const navigate  = useNavigate();
+  const location  = useLocation();
+  const service   = location.state?.service ?? DEFAULT_SERVICE;
+
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [showText,    setShowText]    = useState(false);
   const [techLevel]      = useState(() => localStorage.getItem('masar_tech_level') ?? 'Professional');
   const [vadSensitivity] = useState(() => localStorage.getItem('masar_vad')        ?? 'medium');
-  const [callActive,     setCallActive]     = useState(false);
-  const [sessions,       setSessions]       = useState(() => {
-    try { return JSON.parse(localStorage.getItem('masar_sessions') || '[]'); }
-    catch { return []; }
+  const [callActive, setCallActive] = useState(false);
+  const [sessions,   setSessions]   = useState(() => {
+    try { return JSON.parse(localStorage.getItem('masar_sessions') || '[]'); } catch { return []; }
   });
 
-  const feedEndRef    = useRef(null);
-  const micBtnRef     = useRef(null);
-  const startTimeRef  = useRef(Date.now());
-  const prevStateRef  = useRef('idle'); // tracks previous masarState for restart logic
+  const startTimeRef = useRef(Date.now());
+  const prevStateRef = useRef('idle');
 
-  const { turns, isRecording, isSpeaking, audioLevelRef, error, startRecording, stopRecording, clearTurns, removeTurn } = useAudioStream();
+  const {
+    turns, isRecording, audioLevelRef, error,
+    startRecording, stopRecording, clearTurns, removeTurn,
+  } = useAudioStream();
 
-  // masarResponses:  { [turnId]: string } — tokens streamed from /refine (Layer 3)
-  // streamingIds:    { [turnId]: true }  — present while Layer 3 SSE stream is open
   const [masarResponses, setMasarResponses] = useState({});
   const [streamingIds,   setStreamingIds]   = useState({});
+  const [solutions,      setSolutions]      = useState({});
+  const [solvingIds,     setSolvingIds]     = useState({});
 
-  // solutions:    { [turnId]: string } — tokens streamed from /solve (Layer 4)
-  // solvingIds:   { [turnId]: true }  — present while Layer 4 SSE stream is open
-  const [solutions,  setSolutions]  = useState({});
-  const [solvingIds, setSolvingIds] = useState({});
+  const {
+    ttsStates, play: playTTS, isSpeaking: masarSpeaking, audioRef: ttsAudioRef,
+  } = useTTS();
 
-  // Layer 5 — TTS
-  const { ttsStates, play: playTTS, stop: stopTTS, replay: replayTTS, isSpeaking: masarSpeaking } = useTTS();
-
-  // Auto-trigger TTS once per turn when solution streaming finishes
+  // ── Auto-TTS ───────────────────────────────────────────────────────────────
   const ttsTriggeredRef = useRef(new Set());
   useEffect(() => {
     turns.forEach(t => {
-      if (
-        !t.isActive &&
-        solutions[t.id] &&
-        !solvingIds[t.id] &&
-        !ttsTriggeredRef.current.has(t.id)
-      ) {
+      if (!t.isActive && solutions[t.id] && !solvingIds[t.id] && !ttsTriggeredRef.current.has(t.id)) {
         ttsTriggeredRef.current.add(t.id);
         playTTS(t.id, solutions[t.id]);
       }
     });
   }, [turns, solutions, solvingIds]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Derive MASAR's current state — priority: speaking > listening > thinking > idle
+  // ── masarState ─────────────────────────────────────────────────────────────
   const isThinking = Object.keys(streamingIds).length > 0 || Object.keys(solvingIds).length > 0;
-  const masarState  = masarSpeaking ? 'speaking'
-    : isRecording                   ? 'listening'
-    : isThinking                    ? 'thinking'
+  const masarState = masarSpeaking ? 'speaking'
+    : isRecording                  ? 'listening'
+    : isThinking                   ? 'thinking'
     : 'idle';
 
-  // If startRecording fails (e.g. WebSocket error), deactivate the call so UI doesn't get stuck
+  // Error guard
   useEffect(() => {
-    if (error && callActive && !isRecording) {
-      setCallActive(false);
-    }
+    if (error && callActive && !isRecording) setCallActive(false);
   }, [error]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Trigger refinement whenever a turn closes with captured text
+  // Refinement trigger
   useEffect(() => {
     const toRefine = turns.filter(t => !t.isActive && t.text && masarResponses[t.id] === undefined);
     toRefine.forEach(turn => {
       const wordCount = turn.text.trim().split(/\s+/).filter(Boolean).length;
-      if (wordCount < 5) {
-        removeTurn(turn.id);
-        return;
-      }
+      if (wordCount < 5) { removeTurn(turn.id); return; }
       streamRefine(turn.id, turn.text, techLevel, service.id, setMasarResponses, setStreamingIds);
     });
   }, [turns]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-solve: fire Layer 4 as soon as Layer 3 finishes (replaces manual button)
+  // Auto-solve
   useEffect(() => {
     turns.forEach(t => {
-      if (
-        !t.isActive &&
-        masarResponses[t.id] &&
-        !streamingIds[t.id] &&
-        solutions[t.id] === undefined
-      ) {
+      if (!t.isActive && masarResponses[t.id] && !streamingIds[t.id] && solutions[t.id] === undefined) {
         streamSolve(t.id, masarResponses[t.id], techLevel, service.id, setSolutions, setSolvingIds);
       }
     });
   }, [masarResponses, streamingIds, turns]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── VAD loop ─────────────────────────────────────────────────────────────
-  // Runs only while the call is active and the mic is open.
-  // Reads audioLevelRef (written by useAudioStream's own rAF) — no new audio pipeline.
+  // VAD loop
   useEffect(() => {
     if (!callActive || !isRecording) return;
-
     const THRESHOLD = VAD_THRESHOLDS[vadSensitivity];
-    let speechStart  = null;
-    let silenceStart = null;
-    let rafId;
-
-    let lastLogTime = 0;
-
+    let speechStart = null, silenceStart = null, lastLogTime = 0, rafId;
     const tick = () => {
-      const level = audioLevelRef.current;
-      const now   = Date.now();
-
-      // Log amplitude every 500ms so we can see what the VAD is actually reading
+      const level = audioLevelRef.current, now = Date.now();
       if (now - lastLogTime >= 500) {
-        console.log(`[VAD] level=${level.toFixed(4)} threshold=${THRESHOLD} speechStart=${speechStart ? now - speechStart + 'ms ago' : 'null'} silenceStart=${silenceStart ? now - silenceStart + 'ms ago' : 'null'}`);
+        console.log(`[VAD] level=${level.toFixed(4)} threshold=${THRESHOLD}`);
         lastLogTime = now;
       }
-
       if (level > THRESHOLD) {
-        // Speech detected — reset silence clock, start speech clock
         if (!speechStart) speechStart = now;
         silenceStart = null;
       } else {
-        // Silence detected
         if (!silenceStart) silenceStart = now;
-
-        const speechDuration  = speechStart ? (silenceStart - speechStart) : 0;
-        const silenceDuration = now - silenceStart;
-
-        if (speechDuration >= VAD_MIN_SPEECH && silenceDuration >= VAD_SILENCE_MS) {
-          console.log(`[VAD] FIRING stopRecording — speechDuration=${speechDuration}ms silenceDuration=${silenceDuration}ms`);
-          stopRecording();
-          return;
+        const sd = speechStart ? (silenceStart - speechStart) : 0;
+        if (sd >= VAD_MIN_SPEECH && (now - silenceStart) >= VAD_SILENCE_MS) {
+          stopRecording(); return;
         }
       }
-
       rafId = requestAnimationFrame(tick);
     };
-
     rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
   }, [callActive, isRecording, vadSensitivity]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Auto-restart mic after pipeline completes ────────────────────────────
-  // When masarState transitions from any active state back to idle,
-  // and the call is still active, reopen the mic.
+  // Auto-restart mic
   useEffect(() => {
     const prev = prevStateRef.current;
     prevStateRef.current = masarState;
-
     if (!callActive) return;
-    if (prev !== 'idle' && masarState === 'idle') {
-      startRecording();
-    }
+    if (prev !== 'idle' && masarState === 'idle') startRecording();
   }, [masarState, callActive]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Drive mic button glow directly from amplitude — bypasses React renders entirely
+  // ── Canvas refs ────────────────────────────────────────────────────────────
+  const canvasRef        = useRef(null);
+  const masarStateRef    = useRef('idle');
+  const smoothedAmpRef   = useRef(0);
+  const currentColorsRef = useRef({
+    w1: [...STATE_COLORS.idle.w1],
+    w2: [...STATE_COLORS.idle.w2],
+  });
+  const dotGridRef = useRef(null);
+
+  // Keep masarState readable inside the rAF closure without stale closures
+  useEffect(() => { masarStateRef.current = masarState; }, [masarState]);
+
+  // ── TTS audio level ────────────────────────────────────────────────────────
+  const ttsAudioLevelRef = useRef(0);
+  const ttsAnalyserRef   = useRef(null);
+  const ttsAudioCtxRef   = useRef(null);
+  const ttsBufRef        = useRef(null);
+
+  // Trigger when any TTS track transitions to 'playing' (audioRef.current is set by then)
+  const anyTtsPlaying = Object.values(ttsStates).some(s => s === 'playing');
+
   useEffect(() => {
-    if (!isRecording) {
-      if (micBtnRef.current) {
-        micBtnRef.current.style.boxShadow = '';
-        micBtnRef.current.style.transform = '';
-      }
-      return;
+    // Clean up any previous connection
+    if (ttsAudioCtxRef.current) {
+      ttsAudioCtxRef.current.close().catch(() => {});
+      ttsAudioCtxRef.current = null;
     }
-    let rafId;
-    const update = () => {
-      const lvl = audioLevelRef.current;
-      if (micBtnRef.current) {
-        const ring  = `0 0 0 ${2 + lvl * 6}px rgba(245,158,11,${(0.3 + lvl * 0.65).toFixed(2)})`;
-        const aura  = `0 0 ${10 + lvl * 32}px rgba(245,158,11,${(0.12 + lvl * 0.48).toFixed(2)})`;
-        const halo  = `0 0 ${28 + lvl * 56}px rgba(245,158,11,${(0.04 + lvl * 0.18).toFixed(2)})`;
-        micBtnRef.current.style.boxShadow = `${ring}, ${aura}, ${halo}`;
-        micBtnRef.current.style.transform = `scale(${(1 + lvl * 0.11).toFixed(4)})`;
+    ttsAnalyserRef.current = null;
+    ttsBufRef.current      = null;
+    ttsAudioLevelRef.current = 0;
+
+    if (anyTtsPlaying && ttsAudioRef?.current) {
+      try {
+        const ctx     = new AudioContext();
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 1024;
+        analyser.smoothingTimeConstant = 0.7;
+        const source = ctx.createMediaElementSource(ttsAudioRef.current);
+        source.connect(analyser);
+        analyser.connect(ctx.destination); // audio still plays through speakers
+        ttsAudioCtxRef.current = ctx;
+        ttsAnalyserRef.current = analyser;
+        ttsBufRef.current      = new Uint8Array(analyser.fftSize);
+      } catch (e) {
+        console.warn('[TTS analyser]', e.message);
       }
-      rafId = requestAnimationFrame(update);
-    };
-    rafId = requestAnimationFrame(update);
+    }
+
     return () => {
-      cancelAnimationFrame(rafId);
-      if (micBtnRef.current) {
-        micBtnRef.current.style.boxShadow = '';
-        micBtnRef.current.style.transform = '';
+      if (ttsAudioCtxRef.current) {
+        ttsAudioCtxRef.current.close().catch(() => {});
+        ttsAudioCtxRef.current = null;
       }
+      ttsAnalyserRef.current   = null;
+      ttsBufRef.current        = null;
+      ttsAudioLevelRef.current = 0;
     };
-  }, [isRecording, audioLevelRef]);
+  }, [anyTtsPlaying]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-scroll to bottom whenever a new turn is added or messages arrive
+  // ── ResizeObserver — keep canvas sized to its CSS container ───────────────
   useEffect(() => {
-    feedEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [turns]);
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const obs = new ResizeObserver(entries => {
+      const { width, height } = entries[0].contentRect;
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width  = Math.round(width  * dpr);
+      canvas.height = Math.round(height * dpr);
+      dotGridRef.current = buildDotGrid(canvas.width, canvas.height);
+    });
+    obs.observe(canvas);
+    return () => obs.disconnect();
+  }, []);
 
-  // ── Call control ──────────────────────────────────────────────────────────
-  function startCall() {
-    setCallActive(true);
-    startRecording();
-  }
+  // ── Main canvas rAF loop ───────────────────────────────────────────────────
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    let phase1 = 0, phase2 = 0.5, rafId;
+    const lerp = (a, b, t) => a + (b - a) * t;
 
-  function endCall() {
-    setCallActive(false);
-    stopRecording();
-  }
+    const render = () => {
+      const W = canvas.width, H = canvas.height, baseline = H / 2;
 
-  // Save session to localStorage + navigate to summary
+      // Dark background + dot grid
+      ctx.fillStyle = '#010508';
+      ctx.fillRect(0, 0, W, H);
+      if (dotGridRef.current) ctx.drawImage(dotGridRef.current, 0, 0);
+
+      // ── Amplitude source per state ────────────────────────────────────────
+      const state = masarStateRef.current;
+      let targetAmp;
+
+      if (state === 'listening') {
+        targetAmp = audioLevelRef.current;
+      } else if (state === 'thinking') {
+        targetAmp = Math.abs(Math.sin(Date.now() / 1000)) * 0.3;
+      } else if (state === 'speaking') {
+        if (ttsAnalyserRef.current && ttsBufRef.current) {
+          ttsAnalyserRef.current.getByteTimeDomainData(ttsBufRef.current);
+          let sum = 0;
+          for (let i = 0; i < ttsBufRef.current.length; i++) {
+            const s = (ttsBufRef.current[i] - 128) / 128;
+            sum += s * s;
+          }
+          ttsAudioLevelRef.current = Math.min(1, Math.sqrt(sum / ttsBufRef.current.length) / 0.3);
+        }
+        targetAmp = ttsAudioLevelRef.current;
+      } else {
+        targetAmp = Math.abs(Math.sin(Date.now() / 2000)) * 0.05;
+      }
+
+      smoothedAmpRef.current += (targetAmp - smoothedAmpRef.current) * 0.12;
+      const amp = smoothedAmpRef.current * H * 0.35;
+
+      // ── Color lerp toward target state ────────────────────────────────────
+      const target = STATE_COLORS[state] ?? STATE_COLORS.idle;
+      const cc = currentColorsRef.current;
+      cc.w1 = cc.w1.map((c, i) => lerp(c, target.w1[i], 0.07));
+      cc.w2 = cc.w2.map((c, i) => lerp(c, target.w2[i], 0.07));
+
+      // ── Phase advance (faster when louder) ────────────────────────────────
+      phase1 += 0.022 + smoothedAmpRef.current * 0.045;
+      phase2 += 0.018 + smoothedAmpRef.current * 0.035;
+
+      const lam1 = W / 2.2;
+      const lam2 = W / 1.65;
+
+      drawWave(ctx, W, H, baseline, amp,        phase1, cc.w1, lam1);
+      drawWave(ctx, W, H, baseline, amp * 0.82, phase2, cc.w2, lam2);
+
+      rafId = requestAnimationFrame(render);
+    };
+
+    rafId = requestAnimationFrame(render);
+    return () => cancelAnimationFrame(rafId);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Call controls ──────────────────────────────────────────────────────────
+  function startCall() { setCallActive(true); startRecording(); }
+  function endCall()   { setCallActive(false); stopRecording(); }
+
   function endSession() {
     endCall();
     if (turns.some(t => t.text)) {
       const firstText = turns.find(t => t.text)?.text ?? '';
       const label = firstText.length > 42 ? firstText.slice(0, 42) + '…' : firstText;
-      const durationSecs = Math.round((Date.now() - startTimeRef.current) / 1000);
       const newSession = {
         id: startTimeRef.current,
         label: label || service.label,
@@ -240,7 +350,7 @@ export default function Workspace() {
         serviceId: service.id,
         accent: service.accent,
         techLevel,
-        durationSecs,
+        durationSecs: Math.round((Date.now() - startTimeRef.current) / 1000),
         time: new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }),
       };
       const updated = [newSession, ...sessions].slice(0, 20);
@@ -252,13 +362,11 @@ export default function Workspace() {
     });
   }
 
-  // Start a new session (save current + clear state)
   function newSession() {
     endCall();
     if (turns.some(t => t.text)) {
       const firstText = turns.find(t => t.text)?.text ?? '';
       const label = firstText.length > 42 ? firstText.slice(0, 42) + '…' : firstText;
-      const durationSecs = Math.round((Date.now() - startTimeRef.current) / 1000);
       const saved = {
         id: startTimeRef.current,
         label: label || service.label,
@@ -266,7 +374,7 @@ export default function Workspace() {
         serviceId: service.id,
         accent: service.accent,
         techLevel,
-        durationSecs,
+        durationSecs: Math.round((Date.now() - startTimeRef.current) / 1000),
         time: new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }),
       };
       const updated = [saved, ...sessions].slice(0, 20);
@@ -282,45 +390,105 @@ export default function Workspace() {
     startTimeRef.current = Date.now();
   }
 
-  const isGeneral     = service.id === 'general';
-  const callBusy      = callActive && (masarState === 'thinking' || masarState === 'speaking');
+  const callBusy = callActive && (masarState === 'thinking' || masarState === 'speaking');
+
+  // Latest Claude solution for the text panel (most recent turn with any solution)
+  const latestSolution = (() => {
+    const withSol = turns.filter(t => solutions[t.id]);
+    return withSol.length > 0 ? solutions[withSol[withSol.length - 1].id] : null;
+  })();
 
   return (
-    <div style={{ height: '100vh', display: 'flex', overflow: 'hidden', fontFamily: 'var(--font-body)' }}>
+    <div style={{ height: '100vh', width: '100vw', position: 'relative', overflow: 'hidden', background: '#010508' }}>
 
-      {/* ══ SIDEBAR ══════════════════════════════════════════════════════ */}
-      <aside style={{
-        width: sidebarOpen ? 'var(--sidebar-width)' : '0',
-        minWidth: sidebarOpen ? 'var(--sidebar-width)' : '0',
-        overflow: 'hidden',
-        background: 'var(--masar-surface)',
-        borderRight: '1px solid var(--masar-border)',
-        display: 'flex',
-        flexDirection: 'column',
-        transition: 'width var(--duration-slow) var(--ease-out-expo), min-width var(--duration-slow) var(--ease-out-expo)',
+      {/* ── Full-screen canvas ── */}
+      <canvas
+        ref={canvasRef}
+        style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
+      />
+
+      {/* ── Dark overlay when showText ── */}
+      <div style={{
+        position: 'absolute', inset: 0, zIndex: 10,
+        background: 'rgba(0,0,0,0.45)',
+        opacity: showText ? 1 : 0,
+        transition: 'opacity 300ms ease',
+        pointerEvents: 'none',
+      }} />
+
+      {/* ── Frosted glass text panel ── */}
+      <div style={{
+        position: 'absolute',
+        top: '50%', left: '50%',
+        transform: 'translate(-50%, -50%)',
+        backdropFilter: 'blur(12px)',
+        WebkitBackdropFilter: 'blur(12px)',
+        background: 'rgba(8,12,20,0.75)',
+        border: '1px solid rgba(34,211,238,0.15)',
+        borderRadius: 16,
+        padding: '2rem',
+        maxWidth: 680,
+        width: 'calc(100vw - 4rem)',
+        maxHeight: '60vh',
+        overflowY: 'auto',
+        zIndex: 20,
+        opacity: (showText && latestSolution) ? 1 : 0,
+        transition: 'opacity 300ms ease',
+        pointerEvents: (showText && latestSolution) ? 'auto' : 'none',
       }}>
-        <div style={{ width: 'var(--sidebar-width)', display: 'flex', flexDirection: 'column', height: '100%' }}>
+        {latestSolution && (
+          <p style={{
+            fontFamily: 'Cairo, sans-serif',
+            fontSize: '1.0625rem',
+            lineHeight: 2,
+            direction: 'rtl',
+            textAlign: 'right',
+            color: '#E2E8F0',
+            margin: 0,
+            whiteSpace: 'pre-wrap',
+          }}>
+            {latestSolution}
+          </p>
+        )}
+      </div>
+
+      {/* ── Sidebar scrim ── */}
+      {sidebarOpen && (
+        <div
+          onClick={() => setSidebarOpen(false)}
+          style={{ position: 'absolute', inset: 0, zIndex: 30 }}
+        />
+      )}
+
+      {/* ── Sidebar (absolute overlay, slides from left) ── */}
+      <aside style={{
+        position: 'absolute', left: 0, top: 0, height: '100%',
+        width: 'var(--sidebar-width)',
+        background: 'rgba(8,12,20,0.96)',
+        backdropFilter: 'blur(20px)',
+        WebkitBackdropFilter: 'blur(20px)',
+        borderRight: '1px solid var(--masar-border)',
+        display: 'flex', flexDirection: 'column',
+        transform: sidebarOpen ? 'translateX(0)' : 'translateX(-100%)',
+        transition: 'transform var(--duration-slow) var(--ease-out-expo)',
+        zIndex: 40,
+      }}>
+        <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
 
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '1.25rem 1rem', borderBottom: '1px solid var(--masar-border)' }}>
             <span className="heading-md" style={{ fontSize: '0.9375rem' }}>
               Masar <span style={{ color: 'var(--masar-amber)', fontFamily: 'Cairo, sans-serif' }}>مسار</span>
             </span>
-            <SidebarIconBtn onClick={() => setSidebarOpen(false)} title="Close sidebar">←</SidebarIconBtn>
+            <SidebarIconBtn onClick={() => setSidebarOpen(false)} title="Close">←</SidebarIconBtn>
           </div>
 
           <div style={{ padding: '0.75rem' }}>
-            <button
-              onClick={newSession}
-              style={{
-                width: '100%', background: 'var(--masar-amber-glow)',
-                border: '1px solid var(--masar-amber-line)', borderRadius: 'var(--radius-md)',
-                color: 'var(--masar-amber)', fontFamily: 'var(--font-mono)',
-                fontSize: '0.8125rem', padding: '0.625rem', cursor: 'pointer',
-                transition: 'opacity var(--duration-fast)',
-              }}
-              onMouseEnter={e => e.target.style.opacity = '0.8'}
-              onMouseLeave={e => e.target.style.opacity = '1'}
-            >
+            <button onClick={newSession} style={{
+              width: '100%', background: 'var(--masar-amber-glow)',
+              border: '1px solid var(--masar-amber-line)', borderRadius: 'var(--radius-md)',
+              color: 'var(--masar-amber)', fontFamily: 'var(--font-mono)',
+              fontSize: '0.8125rem', padding: '0.625rem', cursor: 'pointer',
+            }}>
               + New Session
             </button>
           </div>
@@ -331,18 +499,22 @@ export default function Workspace() {
               border: '1px solid var(--masar-border)', borderRadius: 'var(--radius-md)',
               color: '#E2E8F0', fontFamily: 'var(--font-mono)',
               fontSize: '0.8125rem', padding: '0.5rem 0.75rem', outline: 'none',
+              boxSizing: 'border-box',
             }} />
           </div>
 
           <div style={{ flex: 1, overflowY: 'auto', padding: '0 0.75rem' }}>
-            <p className="mono-sm" style={{ color: 'var(--masar-muted)', padding: '0.5rem 0.25rem', marginBottom: '0.25rem' }}>
+            <p className="mono-sm" style={{ color: 'var(--masar-muted)', padding: '0.5rem 0.25rem' }}>
               Previous Sessions
             </p>
             {sessions.length === 0 ? (
               <p className="mono-sm" style={{ color: 'var(--masar-muted)', padding: '0.25rem' }}>No sessions yet</p>
             ) : sessions.map(s => (
-              <div key={s.id}
-                style={{ padding: '0.625rem 0.75rem', borderRadius: 'var(--radius-md)', cursor: 'pointer', marginBottom: '0.125rem', transition: 'background var(--duration-fast)', borderLeft: `2px solid ${s.accent ?? 'var(--masar-border)'}` }}
+              <div key={s.id} style={{
+                padding: '0.625rem 0.75rem', borderRadius: 'var(--radius-md)',
+                cursor: 'pointer', marginBottom: '0.125rem',
+                borderLeft: `2px solid ${s.accent ?? 'var(--masar-border)'}`,
+              }}
                 onMouseEnter={e => e.currentTarget.style.background = 'var(--masar-elevated)'}
                 onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
               >
@@ -359,196 +531,108 @@ export default function Workspace() {
         </div>
       </aside>
 
-      {/* ══ MAIN PANEL ═══════════════════════════════════════════════════ */}
-      <main style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', position: 'relative' }}>
+      {/* ── Top bar ── */}
+      <div style={{
+        position: 'absolute', top: 0, left: 0, right: 0, zIndex: 50,
+        display: 'flex', alignItems: 'center',
+        padding: '1rem 1.25rem',
+        background: 'linear-gradient(to bottom, rgba(1,5,8,0.70) 0%, transparent 100%)',
+      }}>
+        <button
+          onClick={() => setSidebarOpen(v => !v)}
+          style={{
+            background: 'transparent', border: 'none',
+            color: 'rgba(226,232,240,0.7)', fontSize: '1.25rem',
+            cursor: 'pointer', padding: '0.25rem 0.5rem', lineHeight: 1,
+          }}
+        >
+          ☰
+        </button>
 
-        {/* Top bar */}
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '0.875rem 1.5rem', borderBottom: '1px solid var(--masar-border)',
-          background: 'var(--masar-deep)', zIndex: 10, flexShrink: 0,
+        <span style={{
+          flex: 1, textAlign: 'center',
+          fontFamily: 'var(--font-mono)', fontSize: '0.75rem',
+          letterSpacing: '0.12em', textTransform: 'uppercase',
+          color: 'var(--masar-amber)',
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-            {!sidebarOpen && (
-              <SidebarIconBtn onClick={() => setSidebarOpen(true)} title="Open sidebar">→</SidebarIconBtn>
-            )}
-            {/* Call status dot */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.375rem' }}>
-              <div style={{
-                width: 7, height: 7, borderRadius: '50%',
-                background: masarState === 'speaking'  ? 'var(--masar-signal)'
-                          : masarState === 'listening' ? 'var(--masar-amber)'
-                          : masarState === 'thinking'  ? 'var(--masar-cyan)'
-                          : callActive                 ? 'var(--masar-muted)'
-                          : 'var(--masar-muted)',
-                boxShadow: masarState === 'listening' ? '0 0 0 3px rgba(245,158,11,0.2)'
-                         : masarState === 'speaking'  ? '0 0 0 3px rgba(34,197,94,0.2)'
-                         : 'none',
-                transition: 'all var(--duration-base)',
-              }} />
-              <span className="mono-sm" style={{
-                color: masarState === 'speaking'  ? 'var(--masar-signal)'
-                     : masarState === 'listening' ? 'var(--masar-amber)'
-                     : masarState === 'thinking'  ? 'var(--masar-cyan)'
-                     : 'var(--masar-muted)',
-              }}>
-                {masarState === 'speaking'  ? 'Speaking'
-               : masarState === 'listening' ? 'Listening'
-               : masarState === 'thinking'  ? 'Thinking'
-               : callActive                 ? 'Standby'
-               : 'Idle'}
-              </span>
-            </div>
-            {/* Active service badge */}
-            <div style={{
-              display: 'flex', alignItems: 'center', gap: '0.35rem',
-              background: 'var(--masar-elevated)', border: '1px solid var(--masar-border)',
-              borderRadius: '999px', padding: '0.2rem 0.65rem',
-            }}>
-              <span style={{ fontSize: '0.75rem', color: service.accent }}>{service.icon}</span>
-              <span className="mono-sm" style={{ color: service.accent }}>{service.label}</span>
-            </div>
-          </div>
-          <div style={{
-            width: 32, height: 32, borderRadius: '50%',
-            background: 'var(--masar-elevated)', border: '1px solid var(--masar-border-mid)',
+          {service.label}
+        </span>
+
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <TopBarBtn
+            onClick={() => setShowText(v => !v)}
+            active={showText}
+            title={showText ? 'Hide response' : 'Show response'}
+          >
+            👁
+          </TopBarBtn>
+          <TopBarBtn onClick={() => navigate('/settings')} title="Settings">
+            ⚙
+          </TopBarBtn>
+        </div>
+      </div>
+
+      {/* ── Bottom controls ── */}
+      <div style={{
+        position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 50,
+        display: 'flex', flexDirection: 'column', alignItems: 'center',
+        gap: '0.75rem',
+        padding: '1.5rem 1.5rem 2.5rem',
+        background: 'linear-gradient(to top, rgba(1,5,8,0.75) 0%, transparent 100%)',
+      }}>
+
+        <button
+          onClick={callActive ? endCall : startCall}
+          disabled={callBusy}
+          style={{
+            width: 72, height: 72, borderRadius: '50%',
+            border: callActive
+              ? '2px solid rgba(239,68,68,0.80)'
+              : '2px solid rgba(245,158,11,0.60)',
+            background: callActive
+              ? 'rgba(239,68,68,0.12)'
+              : 'rgba(245,158,11,0.08)',
+            color: callActive ? '#EF4444' : 'var(--masar-amber)',
+            fontSize: '1.6rem', lineHeight: 1,
+            cursor: callBusy ? 'not-allowed' : 'pointer',
+            opacity: callBusy ? 0.45 : 1,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            cursor: 'pointer', fontFamily: 'var(--font-display)',
-            fontWeight: 600, fontSize: '0.8125rem', color: 'var(--masar-amber)',
-          }}>A</div>
-        </div>
+            transition: 'border-color 300ms, background 300ms, opacity 300ms',
+            boxShadow: callActive
+              ? '0 0 0 8px rgba(239,68,68,0.07), 0 0 24px rgba(239,68,68,0.12)'
+              : '0 0 0 8px rgba(245,158,11,0.05), 0 0 24px rgba(245,158,11,0.08)',
+          }}
+        >
+          {callActive
+            ? <span style={{ transform: 'rotate(135deg)', display: 'inline-block' }}>📞</span>
+            : <span>🎙</span>}
+        </button>
 
-        {/* ── Scrollable conversation feed ── */}
-        <div style={{
-          flex: 1,
-          overflowY: 'auto',
-          padding: '1.5rem',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '1.5rem',
-          position: 'relative',
+        <span style={{
+          fontFamily: 'var(--font-mono)', fontSize: '0.6875rem',
+          letterSpacing: '0.1em', textTransform: 'uppercase',
+          color: callActive ? 'var(--masar-danger)' : 'rgba(148,163,184,0.45)',
+          transition: 'color 300ms',
         }}>
-          <div className="grid-bg" style={{ opacity: 0.12, pointerEvents: 'none' }} />
+          {callActive ? '● Call Active' : 'Start Call'}
+        </span>
 
-          {/* Empty state */}
-          {turns.length === 0 && (
-            <div style={{
-              flex: 1, display: 'flex', flexDirection: 'column',
-              alignItems: 'center', justifyContent: 'center',
-              color: 'var(--masar-muted)', gap: '0.5rem',
-              minHeight: '200px',
-            }}>
-              <span style={{ fontSize: '2rem', opacity: 0.3 }}>📞</span>
-              <span className="mono-sm" style={{ fontFamily: 'Cairo, sans-serif' }}>
-                {callActive ? 'جارٍ الاستماع…' : 'ابدأ المكالمة للتحدث مع مسار'}
-              </span>
-            </div>
-          )}
+        <button
+          onClick={endSession}
+          style={{
+            background: 'transparent', border: 'none',
+            color: 'rgba(148,163,184,0.40)',
+            fontFamily: 'var(--font-mono)', fontSize: '0.75rem',
+            cursor: 'pointer', transition: 'color 200ms',
+          }}
+          onMouseEnter={e => e.target.style.color = 'rgba(226,232,240,0.80)'}
+          onMouseLeave={e => e.target.style.color = 'rgba(148,163,184,0.40)'}
+        >
+          End Session &amp; View Summary →
+        </button>
 
-          {/* Turn blocks */}
-          {turns.map(turn => (
-            <TurnBlock
-              key={turn.id}
-              turn={turn}
-              error={error}
-              isGeneral={isGeneral}
-              masarResponse={masarResponses[turn.id]}
-              isStreaming={!!streamingIds[turn.id]}
-              solution={solutions[turn.id]}
-              isSolving={!!solvingIds[turn.id]}
-              ttsState={ttsStates[turn.id] ?? 'idle'}
-              onPlay={() => playTTS(turn.id, solutions[turn.id])}
-              onStop={() => stopTTS(turn.id)}
-              onReplay={() => replayTTS(turn.id, solutions[turn.id])}
-            />
-          ))}
+      </div>
 
-          <div ref={feedEndRef} />
-        </div>
-
-        {/* ── Fixed bottom controls ── */}
-        <div style={{
-          flexShrink: 0,
-          borderTop: '1px solid var(--masar-border)',
-          background: 'var(--masar-deep)',
-          padding: '1rem 1.5rem',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          gap: '0.875rem',
-        }}>
-          {/* MASAR State Indicator */}
-          <MasarStateIndicator state={masarState} />
-
-          <div style={{ display: 'flex', alignItems: 'center', gap: '1.75rem' }}>
-
-            {/* ── Call button ── */}
-            <div style={{ position: 'relative', width: 88, height: 88, flexShrink: 0 }}>
-              {/* Ripple rings — while listening */}
-              {isRecording && [0, 1, 2].map(i => (
-                <span key={i} className="mic-ripple" style={{ animationDelay: `${i * 0.7}s` }} />
-              ))}
-
-              <button
-                ref={micBtnRef}
-                onClick={callActive ? endCall : startCall}
-                disabled={callBusy}
-                className={isRecording && !isSpeaking ? 'mic-btn-listening' : ''}
-                style={{
-                  position: 'relative',
-                  width: 88, height: 88, borderRadius: '50%',
-                  border: callActive
-                    ? '2px solid rgba(239,68,68,0.7)'
-                    : '2px solid var(--masar-amber-line)',
-                  background: callActive
-                    ? 'rgba(239,68,68,0.13)'
-                    : 'var(--masar-amber-glow)',
-                  cursor: callBusy ? 'not-allowed' : 'pointer',
-                  opacity: callBusy ? 0.45 : 1,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  transition: 'border-color 300ms ease, background 300ms ease, opacity 300ms ease',
-                  zIndex: 1,
-                }}
-              >
-                {callActive ? (
-                  <span style={{
-                    fontSize: '1.75rem',
-                    display: 'inline-block',
-                    transform: 'rotate(135deg)',
-                    lineHeight: 1,
-                    filter: 'grayscale(1) brightness(1.8)',
-                  }}>
-                    📞
-                  </span>
-                ) : (
-                  <span style={{ fontSize: '1.8rem', lineHeight: 1 }}>🎙</span>
-                )}
-              </button>
-            </div>
-
-          </div>
-
-          {/* Call label + end session */}
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.25rem' }}>
-            <span className="mono-sm" style={{
-              color: callActive ? 'var(--masar-danger)' : 'var(--masar-muted)',
-              fontSize: '0.6875rem', letterSpacing: '0.08em', textTransform: 'uppercase',
-              transition: 'color 300ms',
-            }}>
-              {callActive ? '● Call Active' : 'Press mic to start call'}
-            </span>
-            <button onClick={endSession} className="mono-sm"
-              style={{ background: 'transparent', border: 'none', color: 'var(--masar-muted)', cursor: 'pointer', transition: 'color var(--duration-fast)' }}
-              onMouseEnter={e => e.target.style.color = '#E2E8F0'}
-              onMouseLeave={e => e.target.style.color = 'var(--masar-muted)'}
-            >
-              End session & view summary →
-            </button>
-          </div>
-
-        </div>
-
-      </main>
     </div>
   );
 }
@@ -558,23 +642,18 @@ export default function Workspace() {
 async function streamRefine(turnId, text, techLevel, serviceId, setMasarResponses, setStreamingIds) {
   setMasarResponses(prev => ({ ...prev, [turnId]: '' }));
   setStreamingIds(prev => ({ ...prev, [turnId]: true }));
-
   try {
     const res = await fetch(`${import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000'}/refine`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text, tech_level: techLevel, service_id: serviceId }),
     });
-
     const reader  = res.body.getReader();
     const decoder = new TextDecoder();
-
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-
-      const raw = decoder.decode(value, { stream: true });
-      for (const line of raw.split('\n')) {
+      for (const line of decoder.decode(value, { stream: true }).split('\n')) {
         if (!line.startsWith('data: ')) continue;
         const payload = line.slice(6).trim();
         if (payload === '[DONE]') {
@@ -597,23 +676,23 @@ async function streamRefine(turnId, text, techLevel, serviceId, setMasarResponse
 async function streamSolve(turnId, refinedPrompt, techLevel, serviceId, setSolutions, setSolvingIds) {
   setSolutions(prev => ({ ...prev, [turnId]: '' }));
   setSolvingIds(prev => ({ ...prev, [turnId]: true }));
-
   try {
     const res = await fetch(`${import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000'}/solve`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refined_prompt: refinedPrompt, tech_level: techLevel, service_id: serviceId, response_language: 'arabic' }),
+      body: JSON.stringify({
+        refined_prompt: refinedPrompt,
+        tech_level: techLevel,
+        service_id: serviceId,
+        response_language: 'arabic',
+      }),
     });
-
     const reader  = res.body.getReader();
     const decoder = new TextDecoder();
-
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-
-      const raw = decoder.decode(value, { stream: true });
-      for (const line of raw.split('\n')) {
+      for (const line of decoder.decode(value, { stream: true }).split('\n')) {
         if (!line.startsWith('data: ')) continue;
         const payload = line.slice(6).trim();
         if (payload === '[DONE]') {
@@ -635,246 +714,20 @@ async function streamSolve(turnId, refinedPrompt, techLevel, serviceId, setSolut
 
 /* ══ Sub-components ═══════════════════════════════════════════════════════ */
 
-const WAVEFORM_DELAYS = [0, 140, 80, 220, 40];
-
-function TurnBlock({ turn, error, isGeneral, masarResponse, isStreaming, solution, isSolving,
-                     ttsState = 'idle', onPlay, onStop, onReplay }) {
-  const displayText = turn.isActive
-    ? [turn.text, turn.partial].filter(Boolean).join(' ')
-    : turn.text;
-
-  const isEmpty = !displayText;
-
-  const layer3Label  = isGeneral ? 'Masar (Cleaned)'   : 'Masar';
-  const layer4Label  = isGeneral ? 'Response'          : 'Network Solution';
-  const layer4Color  = isGeneral ? 'var(--masar-cyan)' : 'var(--masar-success)';
-  const layer4Border = isGeneral ? 'var(--masar-cyan)' : 'var(--masar-success)';
-
+function TopBarBtn({ children, onClick, active, title }) {
   return (
-    <div style={{ width: '100%', maxWidth: '680px', margin: '0 auto' }}>
-
-      <p className="mono-sm" style={{
-        color: 'var(--masar-amber)', marginBottom: '0.5rem',
-        letterSpacing: '0.06em', textTransform: 'uppercase', fontSize: '0.6875rem',
-      }}>
-        User Speech
-      </p>
-
-      <div style={{
-        background: 'var(--masar-surface)',
-        border: '1px solid var(--masar-border)',
-        borderLeft: '3px solid var(--masar-amber)',
-        borderRadius: 'var(--radius-md)',
-        padding: '0.75rem 1rem',
-        minHeight: '3.5rem',
-        display: 'flex',
-        alignItems: isEmpty ? 'center' : 'flex-start',
-        justifyContent: isEmpty ? 'center' : 'space-between',
-        gap: '0.75rem',
-        fontFamily: 'Cairo, sans-serif',
-      }}>
-        {isEmpty ? (
-          <span style={{ color: 'var(--masar-muted)', fontStyle: 'italic', fontSize: '0.9rem' }}>
-            {turn.isActive ? 'جارٍ الاستماع…' : 'لم يتم تسجيل أي كلام'}
-          </span>
-        ) : (
-          <>
-            <span style={{
-              fontFamily: 'Cairo, sans-serif',
-              fontSize: '0.9375rem',
-              color: turn.isActive ? 'rgba(226,232,240,0.75)' : '#E2E8F0',
-              direction: 'rtl',
-              flex: 1,
-              lineHeight: 1.7,
-              transition: 'color 0.3s',
-            }}>
-              {error && turn.isActive ? error : displayText}
-            </span>
-            {!turn.isActive && turn.time && (
-              <span className="mono-sm" style={{
-                color: 'var(--masar-muted)', whiteSpace: 'nowrap',
-                paddingTop: '0.25rem', flexShrink: 0,
-              }}>
-                {turn.time}
-              </span>
-            )}
-          </>
-        )}
-      </div>
-
-      {/* Layer 3 output */}
-      {!turn.isActive && (
-        <div style={{
-          background: 'var(--masar-surface)',
-          border: '1px solid var(--masar-border)',
-          borderLeft: '3px solid var(--masar-cyan)',
-          borderRadius: 'var(--radius-md)',
-          padding: '0.75rem 1rem',
-          marginTop: '0.5rem',
-          minHeight: '2.75rem',
-        }}>
-          <span className="mono-sm" style={{ color: 'var(--masar-cyan)', marginRight: '0.75rem' }}>
-            {layer3Label}
-          </span>
-          {masarResponse === undefined ? (
-            <span style={{ fontSize: '0.9375rem', color: 'var(--masar-muted)', fontStyle: 'italic' }}>
-              [ Agent response will appear here ]
-            </span>
-          ) : masarResponse === '' ? (
-            <span className="thinking-dots" style={{ fontSize: '0.9375rem', color: 'var(--masar-cyan)', opacity: 0.6 }}>
-              Thinking
-            </span>
-          ) : (
-            <span style={{ fontSize: '0.9375rem', color: '#E2E8F0', lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>
-              {masarResponse}
-              {isStreaming && <span className="stream-cursor">▌</span>}
-            </span>
-          )}
-        </div>
-      )}
-
-      {/* Layer 4 output */}
-      {!turn.isActive && solution !== undefined && (
-        <div style={{
-          background: 'var(--masar-surface)',
-          border: '1px solid var(--masar-border)',
-          borderLeft: `3px solid ${layer4Border}`,
-          borderRadius: 'var(--radius-md)',
-          padding: '0.75rem 1rem',
-          marginTop: '0.5rem',
-          minHeight: '2.75rem',
-        }}>
-          <span className="mono-sm" style={{ color: layer4Color, marginRight: '0.75rem' }}>
-            {layer4Label}
-          </span>
-          {solution === '' ? (
-            <span className="thinking-dots" style={{ fontSize: '0.9375rem', color: layer4Color, opacity: 0.6 }}>
-              Thinking
-            </span>
-          ) : (
-            <>
-              <span style={{ fontSize: '0.9375rem', color: '#E2E8F0', lineHeight: 1.7, whiteSpace: 'pre-wrap', display: 'block', marginTop: '0.25rem' }}>
-                {solution}
-                {isSolving && <span className="stream-cursor" style={{ color: layer4Color }}>▌</span>}
-              </span>
-
-              {/* Speaker controls */}
-              <div style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.5rem',
-                marginTop: '0.875rem',
-                paddingTop: '0.625rem',
-                borderTop: '1px solid var(--masar-border)',
-                opacity: isSolving ? 0.35 : 1,
-                transition: 'opacity 300ms',
-                pointerEvents: isSolving ? 'none' : 'auto',
-              }}>
-                <div style={{ display: 'flex', alignItems: 'flex-end', gap: '2px', height: 16 }}>
-                  {WAVEFORM_DELAYS.map((delay, i) => (
-                    <span
-                      key={i}
-                      className={`waveform-bar${ttsState === 'playing' ? ' waveform-bar-active' : ''}`}
-                      style={{ animationDelay: `${delay}ms` }}
-                    />
-                  ))}
-                </div>
-
-                <div style={{ flex: 1 }} />
-
-                <button
-                  onClick={() => ttsState === 'playing' ? onStop() : onPlay()}
-                  className="mono-sm"
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: '0.35rem',
-                    background: ttsState === 'playing' ? 'rgba(34,211,238,0.1)' : 'transparent',
-                    border: `1px solid ${ttsState === 'playing' ? 'rgba(34,211,238,0.4)' : 'var(--masar-border)'}`,
-                    color: ttsState === 'loading' ? 'var(--masar-muted)' : 'var(--masar-cyan)',
-                    padding: '0.3rem 0.75rem',
-                    borderRadius: 'var(--radius-md)',
-                    cursor: ttsState === 'loading' ? 'wait' : 'pointer',
-                    transition: 'background 200ms, border-color 200ms, color 200ms',
-                  }}
-                  onMouseEnter={e => { if (ttsState === 'idle') e.currentTarget.style.borderColor = 'rgba(34,211,238,0.35)'; }}
-                  onMouseLeave={e => { if (ttsState === 'idle') e.currentTarget.style.borderColor = 'var(--masar-border)'; }}
-                >
-                  <span>{ttsState === 'loading' ? '…' : ttsState === 'playing' ? '⏹' : '🔊'}</span>
-                  <span>{ttsState === 'loading' ? 'Loading…' : ttsState === 'playing' ? 'Stop' : 'Play Response'}</span>
-                </button>
-
-                <button
-                  onClick={onReplay}
-                  title="Replay"
-                  disabled={ttsState !== 'idle'}
-                  style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    background: 'transparent',
-                    border: '1px solid var(--masar-border)',
-                    color: ttsState !== 'idle' ? 'var(--masar-muted)' : 'var(--masar-cyan)',
-                    width: 30, height: 30,
-                    borderRadius: 'var(--radius-md)',
-                    cursor: ttsState !== 'idle' ? 'not-allowed' : 'pointer',
-                    fontSize: '0.875rem',
-                    opacity: ttsState !== 'idle' ? 0.35 : 1,
-                    transition: 'opacity 200ms, border-color 200ms',
-                  }}
-                  onMouseEnter={e => { if (ttsState === 'idle') e.currentTarget.style.borderColor = 'rgba(34,211,238,0.35)'; }}
-                  onMouseLeave={e => { if (ttsState === 'idle') e.currentTarget.style.borderColor = 'var(--masar-border)'; }}
-                >
-                  🔁
-                </button>
-              </div>
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-
-/* ══ MASAR State Indicator ════════════════════════════════════════════════ */
-
-const STATE_CONFIG = {
-  idle: {
-    color: 'var(--masar-muted)', border: 'var(--masar-border)', bg: 'transparent',
-    dot: 'var(--masar-muted)', dotClass: '', icon: '◎', label: 'Idle',
-  },
-  listening: {
-    color: 'var(--masar-amber)', border: 'rgba(245,158,11,0.4)', bg: 'rgba(245,158,11,0.06)',
-    dot: 'var(--masar-amber)', dotClass: 'state-dot-listening', icon: '🎙', label: 'Listening',
-  },
-  thinking: {
-    color: 'var(--masar-cyan)', border: 'rgba(34,211,238,0.4)', bg: 'rgba(34,211,238,0.06)',
-    dot: 'var(--masar-cyan)', dotClass: 'state-dot-thinking', icon: '⚙', label: 'Thinking',
-  },
-  speaking: {
-    color: 'var(--masar-signal)', border: 'rgba(34,197,94,0.4)', bg: 'rgba(34,197,94,0.06)',
-    dot: 'var(--masar-signal)', dotClass: 'state-dot-speaking', icon: '🔊', label: 'Speaking',
-  },
-};
-
-function MasarStateIndicator({ state }) {
-  const cfg = STATE_CONFIG[state] ?? STATE_CONFIG.idle;
-  return (
-    <div style={{
+    <button onClick={onClick} title={title} style={{
+      background: active ? 'rgba(34,211,238,0.12)' : 'rgba(255,255,255,0.06)',
+      border: active ? '1px solid rgba(34,211,238,0.35)' : '1px solid rgba(255,255,255,0.10)',
+      borderRadius: 'var(--radius-sm)',
+      color: active ? 'var(--masar-cyan)' : 'rgba(226,232,240,0.70)',
+      width: 32, height: 32, cursor: 'pointer',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
-      gap: '0.625rem', padding: '0.5rem 1.5rem', borderRadius: '999px',
-      border: `1px solid ${cfg.border}`, background: cfg.bg,
-      transition: 'border-color 400ms ease, background 400ms ease',
-      minWidth: '180px',
+      fontSize: '0.875rem',
+      transition: 'background 200ms, border-color 200ms, color 200ms',
     }}>
-      <span className={cfg.dotClass} style={{
-        display: 'inline-block', width: 8, height: 8, borderRadius: '50%',
-        background: cfg.dot, flexShrink: 0, transition: 'background 400ms ease',
-      }} />
-      <span style={{ fontSize: '0.875rem', lineHeight: 1, filter: state === 'idle' ? 'grayscale(1) opacity(0.4)' : 'none', transition: 'filter 400ms ease' }}>
-        {cfg.icon}
-      </span>
-      <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem', letterSpacing: '0.1em', textTransform: 'uppercase', color: cfg.color, transition: 'color 400ms ease' }}>
-        {cfg.label}
-      </span>
-    </div>
+      {children}
+    </button>
   );
 }
 
@@ -885,7 +738,7 @@ function SidebarIconBtn({ children, onClick, title }) {
       borderRadius: 'var(--radius-sm)', color: 'var(--masar-muted)',
       width: 28, height: 28, cursor: 'pointer',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
-      fontSize: '0.875rem', transition: 'color var(--duration-fast)',
+      fontSize: '0.875rem',
     }}>
       {children}
     </button>
@@ -897,7 +750,7 @@ function SidebarRow({ icon, label, onClick }) {
     <div onClick={onClick} style={{
       display: 'flex', alignItems: 'center', gap: '0.625rem',
       padding: '0.5rem 0.75rem', borderRadius: 'var(--radius-md)',
-      cursor: 'pointer', transition: 'background var(--duration-fast)',
+      cursor: 'pointer',
     }}
       onMouseEnter={e => e.currentTarget.style.background = 'var(--masar-elevated)'}
       onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
