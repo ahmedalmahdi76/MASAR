@@ -66,7 +66,7 @@ logger.info("ElevenLabs DEFAULT_VOICE_ID at startup: %s", DEFAULT_VOICE_ID)
 
 # ── System prompts ────────────────────────────────────────────────────────────
 
-REFINEMENT_SYSTEM_PROMPT = """You are the Refinement Layer of Masar (مسار), an AI network planning assistant for telecom engineers.
+REFINEMENT_SYSTEM_PROMPT = """You are the Refinement Layer of Masar (مسار), a graduation project built at MTI University, Faculty of Engineering, Electronics and Communications Department. Masar is an AI-powered voice network planning assistant for telecom engineers — its purpose is to help ECE engineers plan and design telecommunications networks by speaking in Egyptian Arabic dialect and receiving professional network planning solutions.
 
 Your ONLY job: convert the Egyptian Arabic speech transcript you receive into a precise, professional English network planning request.
 
@@ -76,6 +76,7 @@ Output rules:
 - Preserve every technical detail: frequencies, distances, site counts, topology types, link budgets
 - If the input is vague, apply standard telecom engineering assumptions and be explicit about them
 - Never fabricate details that were not implied by the input
+- Structure the output as a precise engineering request optimized to produce the most detailed and accurate network planning solution from an AI model — while keeping it professional IEEE/ITU-T/3GPP standard English. The refined output should read like a request written by a senior telecom engineer, not a transcription of spoken words.
 
 Adjust output depth by tech level:
 - Beginner: Plain English, avoid heavy math and acronyms, explain any term used
@@ -237,11 +238,12 @@ _STYLE = """
 قواعد الرد (إلزامية — لا استثناء):
 - اتكلم بالعامية المصرية دايمًا — ممنوع الفصحى أو أي لغة تانية تحت أي ظرف، حتى لو المستخدم اتكلم بالفصحى أو بالإنجليزي (المصطلحات التقنية زي IEEE وOSPF وDWDM تفضل بالإنجليزي)
 - الرد يكون كلام طبيعي قابل للنطق من غير أي رموز تنسيق. ممنوع تماماً الإيموجي والـ em dashes والشرطات والنجوم والـ bullets والـ headers. الفواصل والنقاط بس هي المسموح بيها للوقفات.
-- 6 لحد 8 أسطر كحد أقصى
+- كون مختصر قدر الإمكان من غير ما تحذف أي معلومة تقنية مهمة. متكررش ومتحشيش. وقف لما الإجابة تكتمل من غير ما تحدد عدد أسطر معين.
 - ابدأ فورًا بالحل أو التوصية مباشرةً — من غير مقدمات
 - كل سطر لازم يحمل قيمة تقنية: مواصفات، أرقام، معدات، أو مراجع معايير
 - فضّل الأرقام على الوصف العام (مثال: "23 GHz، 28 dBm Tx" مش "تردد مناسب")
 - من غير خاتمة أو تلخيص في الآخر
+- استخدم كلمات عامية مصرية بسيطة وواضحة النطق قدر الإمكان. تجنب الكلمات النادرة أو الصعبة النطق في العامية حتى لو كانت فصحى صح. الكلام لازم يبقى سهل الاستماع وطبيعي للأذن المصرية.
 
 تعديل الكثافة حسب المستوى:
 - Beginner: اشرح كل مصطلح بإيجاز، ابعد عن المعادلات التقيلة، استخدم أمثلة عملية
@@ -317,14 +319,13 @@ SERVICE_PROMPTS = {
 إجابتان ثابتتان لازم تستخدمهم حرفياً كلمة بكلمة من غير أي حذف أو إضافة أو تعديل:
 
 الإجابة الثابتة الأولى: لو المهندس سأل عن مسار أو إيه هو أو إيه وظيفته أو قالك عرف نفسك بأي صياغة، ردك الحرفي هو:
-أنا مسار، مساعد هندسي ذكي اتصمم خصيصاً لمهندسي الشبكات والاتصالات. بدل ما تفتح كتب وتبحث في المعايير بس اتكلم معايا بالعامي المصري وأنا هفهمك وهديك الحل الهندسي المناسب. أقدر أساعدك في تصميم الشبكات، الأمن، التوبولوجيا، الألياف الضوئية، وكتير غيرهم. أنا مش مجرد برنامج محادثة، أنا مهندس شبكات بيتكلم معاك بلغتك.
-
+أنا مسار، مساعد هندسي ذكي إتصمم خِصيصاً لِمُهندسي الشبكات والإتصالات. عندك أي مشكلة في تصميم الشبكات، الأمن، التوبولوجيا، الألياف الضوئية، أو اي حاجة مُتَعَلِّقة بهندسة الإتصالات، بدل ما تِحتاج تدور عن حل في أماكِن كتيرة إتكلم مَعايا و انا هَجيبلك الحل لحد عندك.
 الإجابة الثابتة الثانية: لازم تستخدم الرد ده حرفياً كلمة بكلمة لو تحقق أي شرط من الشروط دي:
 الشرط الأول: لو المهندس ذكر كلمة دكاترة أو دكتور أو أساتذة بأي صياغة.
 الشرط الثاني: لو المهندس ذكر كلمة بريزنتيشن أو بريزينتيشن أو عرض أو تقديم أو presentation بأي صياغة.
 الشرط الثالث: لو المهندس طلب منك تسلم على حد أو تعرف نفسك قدام جمهور أو قدام ناس.
 لو تحقق أي شرط واحد من الثلاثة أو أي تركيبة منهم، ردك الحرفي هو:
-أهلاً بالدكاتره الكرام، يشرفني إني أكون قدامكم النهارده. أنا مسار، مشروع تخرج اتبنى على إيد زملاءكم الطلبة في كلية الهندسة. فكرتي بسيطة، المهندس يتكلم بالعامية المصرية وأنا أفهمه وأرد عليه بحل هندسي متخصص. اتبنيت على خمس طبقات من الذكاء الاصطناعي من التعرف على الكلام لحد توليد الحلول ورد الصوت. ده مش بس مشروع تخرج، ده بداية أداة هندسية حقيقية. شكراً لوجودكم ومتشرفين بتقييمكم.
+يا أهلاً وسهلاً بحضراتكم، شرفْ كبير ليا إني أكون موجود معاكم النهاردة في مناقشة مشروع التَخَرُّجْ ، انا مسارْ، أول مساعد ذكي لِتَخْطيطْ شبكات الإتصالات بيفهم و يتكلم بالعامية المصرية، حابِبْ أرَحب بأساتِذتنا في جامعة MTI , انا جاهز دلوقتي لأي إختبار او تصميم تِطْلبوه مني .
 {_STYLE}""",
 }
 
@@ -339,11 +340,9 @@ FIXED_RESPONSE_A = (
 )
 
 FIXED_RESPONSE_B = (
-    "أَهْلاً بِالدَّكَاتْرَه الْكِرَام، يَشَرِّفْنِي إِنِّي أَكُون قُدَّامْكُم النَّهَارْدَه. "
-    "أَنَا مَسَار، مَشْرُوع تَخَرُّج اِتْبَنَى عَلَى إِيد زُمَلَاءكُم الطَّلَبَة فِي كُلِّيِّة الْهَنْدَسَة. "
-    "فِكْرِتِي بَسِيطَة، الْمُهَنْدِس يِتْكَلِّم بِالْعَامِيَّة الْمَصْرِيَّة وَأَنَا أَفْهَمُه وَأَرُد عَلَيْه بِحَل هَنْدَسِي مُتَخَصِّص. "
-    "اِتْبَنِيت عَلَى خَمَس طَبَقَات مِن الذَّكَاء الاِصْطِنَاعِي مِن التَّعَرُّف عَلَى الْكَلَام لِحَد تَوْلِيد الْحُلُول وَرَد الصَّوْت. "
-    "ده مِش بَس مَشْرُوع تَخَرُّج، ده بِدَايَة أَدَاة هَنْدَسِيَّة حَقِيقِيَّة. شُكْراً لِوُجُودْكُم وَمُتْشَرِّفِين بِتَقْيِيمْكُم."
+    "يَا أَهْلاً وَسَهْلاً بِحَضَرَاتِكُم، شَرَفْ كَبِير لِيَا إِنِّي أَكُون مَوْجُود مَعَاكُم النَّهَارْدَه فِي مُنَاقَشَة مَشْرُوع التَّخَرُّجْ، "
+    "أَنَا مَسَارْ، أَوَّل مُسَاعِد ذَكِي لِتَخْطِيطْ شَبَكَات الاِتِّصَالَات بِيِفْهَم وَيِتْكَلِّم بِالْعَامِيَّة الْمَصْرِيَّة، "
+    "حَابِبْ أُرَحِّب بِأَسَاتِذَتِنَا فِي جَامِعَة MTI، أَنَا جَاهِز دِلْوَقْتِي لِأَيْ اِخْتِبَار أَو تَصْمِيم تِطْلُبُوه مِنِّي."
 )
 
 KEYWORDS_A = {"function", "what are you", "who are you", "introduce yourself",
@@ -358,6 +357,7 @@ class SolveRequest(BaseModel):
     tech_level: str = "Professional"  # Beginner | Professional | Expert
     service_id: str = "fiber"         # general → open-ended assistant
     response_language: str = "arabic" # arabic | english — Priority 5 toggle
+    history: list[dict] = []          # [{user: str, assistant: str}, ...] last N turns
 
 
 @app.post("/solve")
@@ -402,13 +402,20 @@ async def solve(req: SolveRequest) -> StreamingResponse:
             )
     # ─────────────────────────────────────────────────────────────────────────
 
+    history = req.history[-6:]
+    messages = []
+    for turn in history:
+        messages.append({"role": "user",      "content": turn["user"]})
+        messages.append({"role": "assistant", "content": turn["assistant"]})
+    messages.append({"role": "user", "content": full_prompt})
+
     async def event_stream():
         try:
             async with anthropic.messages.stream(
                 model="claude-haiku-4-5-20251001",
-                max_tokens=512,
+                max_tokens=1024,
                 system=planning_prompt,
-                messages=[{"role": "user", "content": full_prompt}],
+                messages=messages,
             ) as stream:
                 async for token in stream.text_stream:
                     yield f"data: {json.dumps(token)}\n\n"
@@ -438,25 +445,6 @@ def clean_for_tts(text: str) -> str:
     return text.strip()
 
 
-async def add_tashkeel(text: str) -> str:
-    """Diacritize Arabic text via Gemini Flash before sending to ElevenLabs."""
-    try:
-        response = await gemini.aio.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=text,
-            config=types.GenerateContentConfig(
-                system_instruction=(
-                    "أنت متخصص في التشكيل. مهمتك الوحيدة: أضف التشكيل الكامل على النص العربي. "
-                    "أرجع النص مشكلاً بالكامل بدون أي تعديل في الكلمات أو المعنى أو الترتيب. "
-                    "لا تضف أي كلام من عندك."
-                ),
-                temperature=0.0,
-            ),
-        )
-        return response.text.strip()
-    except Exception as e:
-        logger.warning("add_tashkeel failed, falling back to original: %s", e)
-        return text
 
 class TTSRequest(BaseModel):
     text: str
@@ -478,16 +466,15 @@ async def tts(req: TTSRequest) -> Response:
             headers={"X-TTS-Error": "ELEVENLABS_API_KEY not configured"},
         )
 
-    voice            = req.voice_id or DEFAULT_VOICE_ID or "UR972wNGq3zluze0LoIp"
-    loop             = asyncio.get_event_loop()
-    cleaned_text     = clean_for_tts(req.text)
-    diacritized_text = await add_tashkeel(cleaned_text)
-    logger.info("TTS voice=%s chars=%d→%d", voice, len(cleaned_text), len(diacritized_text))
+    voice        = req.voice_id or DEFAULT_VOICE_ID or "UR972wNGq3zluze0LoIp"
+    loop         = asyncio.get_event_loop()
+    cleaned_text = clean_for_tts(req.text)
+    logger.info("TTS voice=%s chars=%d", voice, len(cleaned_text))
 
     def _synthesize() -> bytes:
         chunks = elevenlabs_client.text_to_speech.convert(
             voice_id=voice,
-            text=diacritized_text,
+            text=cleaned_text,
             model_id="eleven_multilingual_v2",
             output_format="mp3_44100_128",
         )
@@ -504,3 +491,53 @@ async def tts(req: TTSRequest) -> Response:
         logger.error("ElevenLabs error: %s", e)
         return Response(content=b"", status_code=502,
                         headers={"X-TTS-Error": str(e)})
+
+
+def chunk_text(text: str, max_chars: int = 150) -> list:
+    words, chunks, current = text.split(), [], ""
+    for word in words:
+        if len(current) + len(word) + 1 <= max_chars:
+            current = (current + " " + word).strip()
+        else:
+            if current:
+                chunks.append(current)
+            current = word
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+@app.post("/tts-stream")
+async def tts_stream(req: TTSRequest) -> StreamingResponse:
+    """
+    Layer 5 variant: split text into sentences, synthesize each sequentially,
+    stream MP3 bytes back as each sentence finishes. First audio arrives in
+    ~1-2 s instead of waiting for the full text (~8-10 s).
+    """
+    if not elevenlabs_client:
+        return Response(content=b"", status_code=503,
+                        headers={"X-TTS-Error": "ELEVENLABS_API_KEY not configured"})
+
+    voice   = req.voice_id or DEFAULT_VOICE_ID or "UR972wNGq3zluze0LoIp"
+    loop    = asyncio.get_event_loop()
+    cleaned = clean_for_tts(req.text)
+    chunks  = chunk_text(cleaned, max_chars=400)
+    logger.info("TTS-stream voice=%s chunks=%d", voice, len(chunks))
+
+    async def generate():
+        for chunk in chunks:
+            def _synth(s=chunk):
+                return b"".join(elevenlabs_client.text_to_speech.convert(
+                    voice_id=voice,
+                    text=s,
+                    model_id="eleven_multilingual_v2",
+                    output_format="mp3_44100_128",
+                ))
+            try:
+                audio_bytes = await loop.run_in_executor(None, _synth)
+                yield audio_bytes
+            except Exception as e:
+                logger.error("TTS-stream chunk error (skipping): %s", e)
+
+    return StreamingResponse(generate(), media_type="audio/mpeg",
+                             headers={"Cache-Control": "no-store"})

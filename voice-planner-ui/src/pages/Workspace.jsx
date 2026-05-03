@@ -108,13 +108,16 @@ export default function Workspace() {
     startRecording, stopRecording, clearTurns, removeTurn,
   } = useAudioStream();
 
-  const [masarResponses, setMasarResponses] = useState({});
-  const [streamingIds,   setStreamingIds]   = useState({});
-  const [solutions,      setSolutions]      = useState({});
-  const [solvingIds,     setSolvingIds]     = useState({});
+  const [masarResponses,      setMasarResponses]      = useState({});
+  const [streamingIds,        setStreamingIds]        = useState({});
+  const [solutions,           setSolutions]           = useState({});
+  const [solvingIds,          setSolvingIds]          = useState({});
+  const [conversationHistory, setConversationHistory] = useState([]);
+  const historyAddedRef = useRef(new Set());
 
   const {
-    ttsStates, play: playTTS, isSpeaking: masarSpeaking, audioRef: ttsAudioRef,
+    ttsStates, play: playTTS, stop: stopTTS,
+    isSpeaking: masarSpeaking, audioRef: ttsAudioRef,
   } = useTTS();
 
   // ── Auto-TTS ───────────────────────────────────────────────────────────────
@@ -154,10 +157,28 @@ export default function Workspace() {
   useEffect(() => {
     turns.forEach(t => {
       if (!t.isActive && masarResponses[t.id] && !streamingIds[t.id] && solutions[t.id] === undefined) {
-        streamSolve(t.id, masarResponses[t.id], techLevel, service.id, setSolutions, setSolvingIds);
+        streamSolve(t.id, masarResponses[t.id], techLevel, service.id, setSolutions, setSolvingIds, conversationHistory);
       }
     });
   }, [masarResponses, streamingIds, turns]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // History tracking — fires once per turn after both refine and solve finish
+  useEffect(() => {
+    turns.forEach(t => {
+      if (
+        !t.isActive &&
+        masarResponses[t.id] && !streamingIds[t.id] &&
+        solutions[t.id]      && !solvingIds[t.id]   &&
+        !historyAddedRef.current.has(t.id)
+      ) {
+        historyAddedRef.current.add(t.id);
+        setConversationHistory(prev => [...prev, {
+          user:      masarResponses[t.id],
+          assistant: solutions[t.id],
+        }]);
+      }
+    });
+  }, [turns, masarResponses, streamingIds, solutions, solvingIds]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // VAD loop
   useEffect(() => {
@@ -193,6 +214,57 @@ export default function Workspace() {
     if (!callActive) return;
     if (prev !== 'idle' && masarState === 'idle') startRecording();
   }, [masarState, callActive]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Barge-in — independent mic monitor, active only while MASAR is speaking
+  useEffect(() => {
+    if (!callActive || masarState !== 'speaking') return;
+
+    const THRESHOLD = VAD_THRESHOLDS[vadSensitivity];
+    let ctx, stream, rafId;
+    let active = true;
+
+    (async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        if (!active) { stream.getTracks().forEach(t => t.stop()); return; }
+
+        ctx = new AudioContext();
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 1024;
+        analyser.smoothingTimeConstant = 0.5;
+        ctx.createMediaStreamSource(stream).connect(analyser);
+        const buf = new Uint8Array(analyser.fftSize);
+
+        const detect = () => {
+          if (!active) return;
+          analyser.getByteTimeDomainData(buf);
+          let sum = 0;
+          for (let i = 0; i < buf.length; i++) {
+            const s = (buf[i] - 128) / 128;
+            sum += s * s;
+          }
+          if (Math.sqrt(sum / buf.length) > THRESHOLD) {
+            active = false;
+            const activeTtsTurn = turns.find(t => ttsStates[t.id] && ttsStates[t.id] !== 'idle');
+            if (activeTtsTurn) stopTTS(activeTtsTurn.id);
+            // auto-restart effect opens the mic when masarState → idle
+            return;
+          }
+          rafId = requestAnimationFrame(detect);
+        };
+        rafId = requestAnimationFrame(detect);
+      } catch (e) {
+        console.warn('[barge-in] mic access failed:', e.message);
+      }
+    })();
+
+    return () => {
+      active = false;
+      if (rafId) cancelAnimationFrame(rafId);
+      ctx?.close().catch(() => {});
+      stream?.getTracks().forEach(t => t.stop());
+    };
+  }, [callActive, masarState]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Canvas refs ────────────────────────────────────────────────────────────
   const canvasRef        = useRef(null);
@@ -336,7 +408,12 @@ export default function Workspace() {
 
   // ── Call controls ──────────────────────────────────────────────────────────
   function startCall() { setCallActive(true); startRecording(); }
-  function endCall()   { setCallActive(false); stopRecording(); }
+  function endCall() {
+    const activeTtsTurn = turns.find(t => ttsStates[t.id] && ttsStates[t.id] !== 'idle');
+    if (activeTtsTurn) stopTTS(activeTtsTurn.id);
+    setCallActive(false);
+    stopRecording();
+  }
 
   function endSession() {
     endCall();
@@ -386,17 +463,26 @@ export default function Workspace() {
     setStreamingIds({});
     setSolutions({});
     setSolvingIds({});
+    setConversationHistory([]);
     ttsTriggeredRef.current = new Set();
+    historyAddedRef.current = new Set();
     startTimeRef.current = Date.now();
   }
 
-  const callBusy = callActive && (masarState === 'thinking' || masarState === 'speaking');
+  const callBusy = callActive && masarState === 'thinking';
 
   // Latest Claude solution for the text panel (most recent turn with any solution)
   const latestSolution = (() => {
     const withSol = turns.filter(t => solutions[t.id]);
     return withSol.length > 0 ? solutions[withSol[withSol.length - 1].id] : null;
   })();
+
+  const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
+  const latestTranscript = latestTurn
+    ? (latestTurn.isActive
+        ? [latestTurn.text, latestTurn.partial].filter(Boolean).join(' ') || null
+        : latestTurn.text || null)
+    : null;
 
   return (
     <div style={{ height: '100vh', width: '100vw', position: 'relative', overflow: 'hidden', background: '#010508' }}>
@@ -432,24 +518,59 @@ export default function Workspace() {
         maxHeight: '60vh',
         overflowY: 'auto',
         zIndex: 20,
-        opacity: (showText && latestSolution) ? 1 : 0,
+        opacity: (showText && (latestTranscript || latestSolution)) ? 1 : 0,
         transition: 'opacity 300ms ease',
-        pointerEvents: (showText && latestSolution) ? 'auto' : 'none',
+        pointerEvents: (showText && (latestTranscript || latestSolution)) ? 'auto' : 'none',
       }}>
-        {latestSolution && (
-          <p style={{
-            fontFamily: 'Cairo, sans-serif',
-            fontSize: '1.0625rem',
-            lineHeight: 2,
-            direction: 'rtl',
-            textAlign: 'right',
-            color: '#E2E8F0',
-            margin: 0,
-            whiteSpace: 'pre-wrap',
-          }}>
-            {latestSolution}
-          </p>
+
+        {/* قلت — user speech */}
+        {latestTranscript && (
+          <div>
+            <p style={{
+              fontFamily: 'var(--font-mono)', fontSize: '0.6875rem',
+              letterSpacing: '0.1em', color: 'var(--masar-amber)',
+              textAlign: 'right', margin: '0 0 0.5rem 0',
+            }}>
+              قلت
+            </p>
+            <p style={{
+              fontFamily: 'Cairo, sans-serif', fontSize: '1rem',
+              lineHeight: 1.9, direction: 'rtl', textAlign: 'right',
+              color: 'var(--masar-muted)', margin: 0, whiteSpace: 'pre-wrap',
+            }}>
+              {latestTranscript}
+              {latestTurn?.isActive && (
+                <span className="stream-cursor" style={{ color: 'var(--masar-amber)' }}>▌</span>
+              )}
+            </p>
+          </div>
         )}
+
+        {/* Divider */}
+        {latestTranscript && latestSolution && (
+          <div style={{ borderTop: '1px solid rgba(255,255,255,0.07)', margin: '1.25rem 0' }} />
+        )}
+
+        {/* مسار — Claude response */}
+        {latestSolution && (
+          <div>
+            <p style={{
+              fontFamily: 'var(--font-mono)', fontSize: '0.6875rem',
+              letterSpacing: '0.1em', color: 'var(--masar-cyan)',
+              textAlign: 'right', margin: '0 0 0.5rem 0',
+            }}>
+              مسار
+            </p>
+            <p style={{
+              fontFamily: 'Cairo, sans-serif', fontSize: '1.0625rem',
+              lineHeight: 2, direction: 'rtl', textAlign: 'right',
+              color: '#E2E8F0', margin: 0, whiteSpace: 'pre-wrap',
+            }}>
+              {latestSolution}
+            </p>
+          </div>
+        )}
+
       </div>
 
       {/* ── Sidebar scrim ── */}
@@ -673,7 +794,7 @@ async function streamRefine(turnId, text, techLevel, serviceId, setMasarResponse
   }
 }
 
-async function streamSolve(turnId, refinedPrompt, techLevel, serviceId, setSolutions, setSolvingIds) {
+async function streamSolve(turnId, refinedPrompt, techLevel, serviceId, setSolutions, setSolvingIds, history = []) {
   setSolutions(prev => ({ ...prev, [turnId]: '' }));
   setSolvingIds(prev => ({ ...prev, [turnId]: true }));
   try {
@@ -685,6 +806,7 @@ async function streamSolve(turnId, refinedPrompt, techLevel, serviceId, setSolut
         tech_level: techLevel,
         service_id: serviceId,
         response_language: 'arabic',
+        history,
       }),
     });
     const reader  = res.body.getReader();
