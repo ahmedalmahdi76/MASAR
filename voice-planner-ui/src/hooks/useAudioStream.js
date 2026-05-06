@@ -51,7 +51,21 @@ export function useAudioStream() {
     activeTurnIdRef.current = turnId;
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      await new Promise(resolve => setTimeout(resolve, 200));
+      let stream;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          await new Promise(r => setTimeout(r, 200 * attempt));
+          stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+          break;
+        } catch (e) {
+          if (e.name === 'NotReadableError' && attempt < 2) {
+            console.warn('[mic] NotReadableError attempt', attempt + 1, '— retrying...');
+            continue;
+          }
+          throw e;
+        }
+      }
       streamRef.current = stream;
 
       const audioCtx = new AudioContext();
@@ -141,7 +155,7 @@ export function useAudioStream() {
     }
   }, []);
 
-  const stopRecording = useCallback(() => {
+  const stopRecording = useCallback(async () => {
     // Stop VAD loop and reset level
     if (rafRef.current) {
       cancelAnimationFrame(rafRef.current);
@@ -165,13 +179,12 @@ export function useAudioStream() {
 
     workletRef.current?.disconnect();
     workletRef.current?.port.close();
-    audioCtxRef.current?.close();
+    await audioCtxRef.current?.close();
     streamRef.current?.getTracks().forEach(t => t.stop());
-    wsRef.current?.close();
-
-    workletRef.current  = null;
     audioCtxRef.current = null;
     streamRef.current   = null;
+    wsRef.current?.close();
+    workletRef.current  = null;
     wsRef.current       = null;
 
     setIsRecording(false);

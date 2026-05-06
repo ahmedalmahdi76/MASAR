@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { supabase } from './supabase';
+import { ThemeProvider } from './contexts/ThemeContext';
+import Spinner from './components/Spinner';
 import LandingPage    from './pages/LandingPage';
 import AuthPage       from './pages/AuthPage';
 import ServiceSelect  from './pages/ServiceSelect';
@@ -32,13 +34,18 @@ function ProtectedRoute({ children }) {
     <div style={{
       minHeight: '100vh',
       background: 'var(--masar-void)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      color: 'var(--masar-muted)',
-      fontFamily: 'var(--font-mono)',
-      fontSize: '0.75rem',
-      letterSpacing: '0.1em',
+      display: 'flex', flexDirection: 'column',
+      alignItems: 'center', justifyContent: 'center',
+      gap: '1.25rem',
     }}>
-      AUTHENTICATING...
+      <span style={{
+        fontFamily: 'Syne, sans-serif', fontWeight: 700,
+        fontSize: '1.25rem', color: '#E2E8F0',
+        letterSpacing: '-0.01em',
+      }}>
+        Masar <span style={{ color: 'var(--masar-amber)', fontFamily: 'Cairo, sans-serif' }}>مسار</span>
+      </span>
+      <Spinner size={28} />
     </div>
   );
 
@@ -47,18 +54,20 @@ function ProtectedRoute({ children }) {
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route path="/"     element={<LandingPage />} />
-        <Route path="/auth" element={<AuthPage />} />
+    <ThemeProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/"     element={<LandingPage />} />
+          <Route path="/auth" element={<AuthPage />} />
 
-        <Route path="/services"  element={<ProtectedRoute><ServiceSelect /></ProtectedRoute>} />
-        <Route path="/workspace" element={<ProtectedRoute><Workspace /></ProtectedRoute>} />
-        <Route path="/summary"   element={<ProtectedRoute><SessionSummary /></ProtectedRoute>} />
-        <Route path="/settings"  element={<ProtectedRoute><Settings /></ProtectedRoute>} />
+          <Route path="/services"  element={<ProtectedRoute><ServiceSelect /></ProtectedRoute>} />
+          <Route path="/workspace" element={<ProtectedRoute><Workspace /></ProtectedRoute>} />
+          <Route path="/summary"   element={<ProtectedRoute><SessionSummary /></ProtectedRoute>} />
+          <Route path="/settings"  element={<ProtectedRoute><Settings /></ProtectedRoute>} />
 
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </BrowserRouter>
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </BrowserRouter>
+    </ThemeProvider>
   );
 }

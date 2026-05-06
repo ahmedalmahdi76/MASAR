@@ -361,3 +361,70 @@ body {
   inset: 0;
   background: radial-gradient(ellipse 80% 60% at 50% 0%, transparent 40%, var(--masar-void) 100%);
 }
+
+/* ============================================
+   LIGHT MODE OVERRIDES
+   ============================================ */
+
+[data-theme="light"] {
+  --masar-void:       #F8FAFC;
+  --masar-deep:       #F1F5F9;
+  --masar-surface:    #FFFFFF;
+  --masar-elevated:   #F8FAFC;
+  --masar-bg:         #F1F5F9;
+  --masar-border:     rgba(0,0,0,0.10);
+  --masar-border-mid: rgba(0,0,0,0.20);
+  --masar-muted:      #64748B;
+}
+
+[data-theme="light"] body {
+  color: #1E293B;
+}
+
+/* ============================================
+   SPINNER
+   ============================================ */
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ============================================
+   MICRO-ANIMATIONS
+   ============================================ */
+
+/* Global button active feedback */
+button:not(:disabled):active {
+  transform: scale(0.97);
+  transition: transform 100ms ease;
+}
+
+/* Bento card — enhanced hover + active */
+.bento-card:hover {
+  transform: translateY(-4px) scale(1.02) !important;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.4) !important;
+}
+.bento-card:active {
+  transform: scale(0.98) !important;
+}
+
+/* Sidebar scrim fade */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.scrim-enter {
+  animation: fadeIn 200ms ease forwards;
+}
+
+/* Settings section stagger (reuses existing pageEnter keyframe) */
+.settings-section {
+  animation: pageEnter var(--duration-base) var(--ease-out-expo) both;
+  opacity: 0;
+}
+.settings-section:nth-child(1) { animation-delay: 0ms;   }
+.settings-section:nth-child(2) { animation-delay: 60ms;  }
+.settings-section:nth-child(3) { animation-delay: 120ms; }
+.settings-section:nth-child(4) { animation-delay: 180ms; }
+.settings-section:nth-child(5) { animation-delay: 240ms; }

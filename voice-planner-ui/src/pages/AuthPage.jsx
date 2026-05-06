@@ -1,13 +1,14 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabase';
+import Spinner from '../components/Spinner';
 
 function translateError(error) {
   const msg = error?.message?.toLowerCase() ?? '';
   if (msg.includes('invalid login') || msg.includes('invalid credentials'))
     return 'الإيميل أو كلمة المرور غلط';
-  if (msg.includes('already registered') || msg.includes('already in use') || msg.includes('already exists'))
-    return 'الإيميل ده مسجل قبل كده';
+  if (msg.includes('already registered') || msg.includes('user already') || msg.includes('already in use') || msg.includes('already exists'))
+    return 'الإيميل ده مسجل قبل كده، حاول تسجل دخول';
   if (msg.includes('password') && (msg.includes('6') || msg.includes('weak')))
     return 'كلمة المرور لازم تكون ٦ حروف على الأقل';
   if (msg.includes('invalid email') || msg.includes('valid email'))
@@ -26,7 +27,9 @@ export default function AuthPage() {
   const [password,     setPassword]     = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading,      setLoading]      = useState(false);
+  const [oauthLoading, setOauthLoading] = useState('');  // provider name while redirecting
   const [authError,    setAuthError]    = useState('');
+  const [signupSuccess,setSignupSuccess]= useState('');
 
   // Forgot password
   const [forgotMode,   setForgotMode]   = useState(false);
@@ -42,16 +45,26 @@ export default function AuthPage() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setAuthError('');
+    setSignupSuccess('');
+
+    // Client-side validation
+    if (!email.trim())                                   { setAuthError('من فضلك اكتب الإيميل'); return; }
+    if (!email.includes('@') || !email.includes('.'))    { setAuthError('الإيميل مش صح'); return; }
+    if (!password)                                       { setAuthError('من فضلك اكتب كلمة المرور'); return; }
+    if (mode === 'signup' && password.length < 6)        { setAuthError('كلمة المرور لازم تكون ٦ حروف على الأقل'); return; }
+
     setLoading(true);
     try {
       if (mode === 'signup') {
         const { error } = await supabase.auth.signUp({ email, password });
         if (error) { setAuthError(translateError(error)); return; }
+        setSignupSuccess('تم إنشاء الحساب، راجع إيميلك وأكد الحساب عشان تقدر تسجل دخول');
+        return; // stay on page — user must confirm email first
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) { setAuthError(translateError(error)); return; }
+        navigate('/services');
       }
-      navigate('/services');
     } catch {
       setAuthError('في مشكلة في الاتصال، حاول تاني');
     } finally {
@@ -61,20 +74,22 @@ export default function AuthPage() {
 
   const handleGoogle = async () => {
     setAuthError('');
+    setOauthLoading('google');
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: { redirectTo: window.location.origin + '/services' },
     });
-    if (error) setAuthError(translateError(error));
+    if (error) { setAuthError(translateError(error)); setOauthLoading(''); }
   };
 
   const handleGitHub = async () => {
     setAuthError('');
+    setOauthLoading('github');
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'github',
       options: { redirectTo: window.location.origin + '/services' },
     });
-    if (error) setAuthError(translateError(error));
+    if (error) { setAuthError(translateError(error)); setOauthLoading(''); }
   };
 
   const handleForgotPassword = async () => {
@@ -125,7 +140,7 @@ export default function AuthPage() {
           }}>
             {['signin', 'signup'].map(m => (
               <button key={m}
-                onClick={() => { setMode(m); setAuthError(''); setForgotMode(false); setResetMsg(''); }}
+                onClick={() => { setMode(m); setAuthError(''); setSignupSuccess(''); setForgotMode(false); setResetMsg(''); }}
                 className="mono-sm"
                 style={{
                   background: mode === m ? 'var(--masar-border-mid)' : 'transparent',
@@ -208,7 +223,7 @@ export default function AuthPage() {
                         opacity: resetLoading ? 0.7 : 1,
                       }}
                     >
-                      {resetLoading ? '...' : 'Send Reset Link'}
+                      {resetLoading ? <><Spinner size={13} />&nbsp;جاري الإرسال...</> : 'Send Reset Link'}
                     </button>
                     <button
                       type="button"
@@ -256,6 +271,16 @@ export default function AuthPage() {
               </p>
             )}
 
+            {signupSuccess && (
+              <p style={{
+                fontFamily: 'Cairo, sans-serif', fontSize: '0.875rem',
+                color: '#22D3EE', textAlign: 'right', direction: 'rtl',
+                margin: 0, lineHeight: 1.7,
+              }}>
+                {signupSuccess}
+              </p>
+            )}
+
             <button
               type="submit"
               disabled={loading}
@@ -272,7 +297,9 @@ export default function AuthPage() {
               onMouseEnter={e => { if (!loading) e.target.style.opacity = '0.88'; }}
               onMouseLeave={e => { if (!loading) e.target.style.opacity = '1'; }}
             >
-              {loading ? '...' : mode === 'signin' ? 'Sign In' : 'Create Account'}
+              {loading
+                ? <>{<Spinner size={14} />}&nbsp;{mode === 'signin' ? 'جاري الدخول...' : 'جاري الإنشاء...'}</>
+                : mode === 'signin' ? 'Sign In' : 'Create Account'}
             </button>
           </form>
 
@@ -283,8 +310,18 @@ export default function AuthPage() {
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.625rem' }}>
-            <OAuthButton label="Continue with Google" icon="G" onClick={handleGoogle} />
-            <OAuthButton label="Continue with GitHub" icon="⌥" onClick={handleGitHub} />
+            <OAuthButton
+              label={oauthLoading === 'google' ? 'جاري الاتصال...' : 'Continue with Google'}
+              icon={oauthLoading === 'google' ? <Spinner size={14} /> : 'G'}
+              onClick={handleGoogle}
+              disabled={!!oauthLoading}
+            />
+            <OAuthButton
+              label={oauthLoading === 'github' ? 'جاري الاتصال...' : 'Continue with GitHub'}
+              icon={oauthLoading === 'github' ? <Spinner size={14} /> : '⌥'}
+              onClick={handleGitHub}
+              disabled={!!oauthLoading}
+            />
           </div>
 
           <button
@@ -364,21 +401,22 @@ function AuthInput({ placeholder, type = 'text', value, onChange }) {
   );
 }
 
-function OAuthButton({ label, icon, onClick }) {
+function OAuthButton({ label, icon, onClick, disabled }) {
   return (
-    <button type="button" className="mono-sm" onClick={onClick}
+    <button type="button" className="mono-sm" onClick={onClick} disabled={disabled}
       style={{
         width: '100%', background: 'var(--masar-elevated)',
         border: '1px solid var(--masar-border)',
         borderRadius: 'var(--radius-md)', color: '#E2E8F0',
-        padding: '0.6875rem', cursor: 'pointer',
+        padding: '0.6875rem', cursor: disabled ? 'wait' : 'pointer',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         gap: '0.625rem', transition: 'border-color var(--duration-fast)',
+        opacity: disabled ? 0.7 : 1,
       }}
-      onMouseEnter={e => e.currentTarget.style.borderColor = 'var(--masar-border-mid)'}
+      onMouseEnter={e => { if (!disabled) e.currentTarget.style.borderColor = 'var(--masar-border-mid)'; }}
       onMouseLeave={e => e.currentTarget.style.borderColor = 'var(--masar-border)'}
     >
-      <span style={{ fontWeight: 600 }}>{icon}</span>
+      <span style={{ fontWeight: 600, display: 'flex', alignItems: 'center' }}>{icon}</span>
       {label}
     </button>
   );

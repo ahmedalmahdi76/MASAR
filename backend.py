@@ -170,53 +170,41 @@ class RefineRequest(BaseModel):
 @app.post("/refine")
 async def refine(req: RefineRequest) -> StreamingResponse:
     """
-    Layer 3: Arabic transcript → Gemini → streamed ECE English via SSE.
-
-    The google-generativeai SDK's sync streaming is reliable; we run it in a
-    daemon thread and pipe tokens into an asyncio.Queue so FastAPI can yield
-    them without blocking the event loop.
+    Layer 3: Arabic transcript → Claude Haiku → streamed ECE English via SSE.
 
     SSE format:  data: <json-encoded token>\\n\\n
                  data: [DONE]\\n\\n
     """
     system_prompt = GENERAL_REFINEMENT_SYSTEM_PROMPT if req.service_id == "general" else REFINEMENT_SYSTEM_PROMPT
-    full_prompt = f"Tech level: {req.tech_level}\n\nArabic transcript:\n{req.text}"
+    full_prompt   = f"Tech level: {req.tech_level}\n\nArabic transcript:\n{req.text}"
 
     async def event_stream():
         max_retries = 3
         try:
             for attempt in range(max_retries):
                 try:
-                    logger.info("Gemini: stream attempt %d", attempt + 1)
-                    async for chunk in await gemini.aio.models.generate_content_stream(
-                        model="gemini-2.5-flash",
-                        contents=full_prompt,
-                        config=types.GenerateContentConfig(
-                            system_instruction=system_prompt,
-                            temperature=0.3,
-                        ),
-                    ):
-                        if chunk.text:
-                            yield f"data: {json.dumps(chunk.text)}\n\n"
-                    logger.info("Gemini: stream complete")
+                    logger.info("Claude refine: attempt %d", attempt + 1)
+                    async with anthropic.messages.stream(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=300,
+                        system=system_prompt,
+                        messages=[{"role": "user", "content": full_prompt}],
+                    ) as stream:
+                        async for token in stream.text_stream:
+                            yield f"data: {json.dumps(token)}\n\n"
+                    logger.info("Claude refine: complete")
                     return
                 except Exception as e:
-                    err_str = str(e)
-                    if ("429" in err_str or "503" in err_str) and attempt < max_retries - 1:
-                        if "429" in err_str:
-                            match = re.search(r'retry in ([\d.]+)(m?s)', err_str)
-                            if match:
-                                delay = float(match.group(1)) / 1000 if match.group(2) == 'ms' else float(match.group(1))
-                                delay = max(1, min(int(delay) + 2, 65))
-                            else:
-                                delay = 30
-                        else:
-                            delay = 5  # 503: short wait, usually recovers quickly
-                        logger.warning("Gemini %s — retrying in %ds", "429" if "429" in err_str else "503", delay)
+                    err_str    = str(e)
+                    is_rate     = "429" in err_str or "rate_limit" in err_str.lower()
+                    is_overload = "529" in err_str or "overloaded" in err_str.lower() or "503" in err_str
+                    if (is_rate or is_overload) and attempt < max_retries - 1:
+                        delay = 30 if is_rate else 5
+                        logger.warning("Claude refine %s — retrying in %ds", "429" if is_rate else "503/529", delay)
                         yield f"data: {json.dumps(f'[Retrying in {delay}s…]')}\n\n"
                         await asyncio.sleep(delay)
                     else:
-                        logger.error("Gemini error: %s", e)
+                        logger.error("Claude refine error: %s", e)
                         yield f"data: {json.dumps('[ERROR] ' + err_str)}\n\n"
                         return
         finally:
@@ -225,10 +213,7 @@ async def refine(req: RefineRequest) -> StreamingResponse:
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
@@ -340,9 +325,17 @@ FIXED_RESPONSE_A = (
 )
 
 FIXED_RESPONSE_B = (
-    "يَا أَهْلاً وَسَهْلاً بِحَضَرَاتِكُم، شَرَفْ كَبِير لِيَا إِنِّي أَكُون مَوْجُود مَعَاكُم النَّهَارْدَه فِي مُنَاقَشَة مَشْرُوع التَّخَرُّجْ، "
-    "أَنَا مَسَارْ، أَوَّل مُسَاعِد ذَكِي لِتَخْطِيطْ شَبَكَات الاِتِّصَالَات بِيِفْهَم وَيِتْكَلِّم بِالْعَامِيَّة الْمَصْرِيَّة، "
-    "حَابِبْ أُرَحِّب بِأَسَاتِذَتِنَا فِي جَامِعَة MTI، أَنَا جَاهِز دِلْوَقْتِي لِأَيْ اِخْتِبَار أَو تَصْمِيم تِطْلُبُوه مِنِّي."
+    "أهلا وسهلا بحضراتكم,شرف كبير ليا ظغني اكون متواجد معاكم انهرده في مناقشة مشروع التخرج"
+    "انا مسار مشروع التخرج المصمم من طلاب جامعة MTI "
+    "انا مساعد ذكي مصمم خصيصا لمساعدة مهندسي الشبكات والإتصالات في تصميم شبكاتهم وحل مشاكلهم التقنية "
+    "انا جاهز لأي اختبار او تصميم تطلبوه مني"
+)
+
+FIXED_RESPONSE_C = (
+    "أهلا وسهلا يا دكتور محمد, انا عرفت مؤخرا ان حضرتك المسؤول عن المشروع و شرف لينا جميعا تواجد حضرتك معانا."
+    " انا مسار مساعد هندسي فكرته الأساسية مساعدة مهندسي الشبكات والإتصالات في عملهم"
+    "بقدر أٌقدم عديد من الخدمات منها network topology , أمن الشبكات , وتخطيط الفايبر اوبتيكس"
+    "تحب اساعد حضرتك إزاي انهرده؟"
 )
 
 KEYWORDS_A = {"function", "what are you", "who are you", "introduce yourself",
@@ -350,6 +343,9 @@ KEYWORDS_A = {"function", "what are you", "who are you", "introduce yourself",
 
 KEYWORDS_B = {"doctors", "professors", "presentation", "greet them",
               "introduce yourself to", "say hi to"}
+
+KEYWORDS_C = {"sharaf", "dr sharaf", "professor sharaf", "mohamed sharaf", "dr mohamed",
+              "شراف", "محمد شراف"}
 
 
 class SolveRequest(BaseModel):
@@ -378,13 +374,17 @@ async def solve(req: SolveRequest) -> StreamingResponse:
     if req.service_id == "general":
         lowered = req.refined_prompt.lower()
         logger.info("INTERCEPT lowered=%r", lowered)
+        c_hits = [kw for kw in KEYWORDS_C if kw in lowered]
         b_hits = [kw for kw in KEYWORDS_B if kw in lowered]
         a_hits = [kw for kw in KEYWORDS_A if kw in lowered]
+        logger.info("INTERCEPT KEYWORDS_C hits=%r", c_hits)
         logger.info("INTERCEPT KEYWORDS_B hits=%r", b_hits)
         logger.info("INTERCEPT KEYWORDS_A hits=%r", a_hits)
 
         fixed_text = None
-        if b_hits:
+        if c_hits:
+            fixed_text = FIXED_RESPONSE_C
+        elif b_hits:
             fixed_text = FIXED_RESPONSE_B
         elif a_hits:
             fixed_text = FIXED_RESPONSE_A

@@ -47,6 +47,7 @@ export function useTTS() {
   // ── public API ────────────────────────────────────────────────────────────
 
   async function play(turnId, text) {
+    console.log('[useTTS] play() called — turnId:', turnId, 'textLen:', text?.length);
     _stopCurrent();
     _setTts(turnId, 'loading');
     activeRef.current = turnId;

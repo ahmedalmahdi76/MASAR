@@ -2,6 +2,8 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAudioStream } from '../hooks/useAudioStream';
 import { useTTS } from '../hooks/useTTS';
+import { useTheme } from '../contexts/ThemeContext';
+import ThemeToggle from '../components/ThemeToggle';
 
 const VAD_THRESHOLDS = { low: 0.20, medium: 0.10, high: 0.05 };
 const VAD_SILENCE_MS = 4000;
@@ -90,6 +92,9 @@ export default function Workspace() {
   const navigate  = useNavigate();
   const location  = useLocation();
   const service   = location.state?.service ?? DEFAULT_SERVICE;
+  const { theme } = useTheme();
+  const themeRef  = useRef(theme);
+  useEffect(() => { themeRef.current = theme; }, [theme]);
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showText,    setShowText]    = useState(false);
@@ -121,11 +126,18 @@ export default function Workspace() {
   } = useTTS();
 
   // ── Auto-TTS ───────────────────────────────────────────────────────────────
-  const ttsTriggeredRef = useRef(new Set());
+  const ttsTriggeredRef   = useRef(new Set());
+  const lastSpokenRef     = useRef(null);   // text of last solution spoken
+  const lastSpokenTurnRef = useRef(null);   // turn ID of last solution spoken
+  const [hasLastSpoken, setHasLastSpoken] = useState(false);
+
   useEffect(() => {
     turns.forEach(t => {
       if (!t.isActive && solutions[t.id] && !solvingIds[t.id] && !ttsTriggeredRef.current.has(t.id)) {
         ttsTriggeredRef.current.add(t.id);
+        lastSpokenRef.current     = solutions[t.id];
+        lastSpokenTurnRef.current = t.id;
+        setHasLastSpoken(true);
         playTTS(t.id, solutions[t.id]);
       }
     });
@@ -217,54 +229,8 @@ export default function Workspace() {
 
   // Barge-in — independent mic monitor, active only while MASAR is speaking
   useEffect(() => {
-    if (!callActive || masarState !== 'speaking') return;
-
-    const THRESHOLD = VAD_THRESHOLDS[vadSensitivity];
-    let ctx, stream, rafId;
-    let active = true;
-
-    (async () => {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        if (!active) { stream.getTracks().forEach(t => t.stop()); return; }
-
-        ctx = new AudioContext();
-        const analyser = ctx.createAnalyser();
-        analyser.fftSize = 1024;
-        analyser.smoothingTimeConstant = 0.5;
-        ctx.createMediaStreamSource(stream).connect(analyser);
-        const buf = new Uint8Array(analyser.fftSize);
-
-        const detect = () => {
-          if (!active) return;
-          analyser.getByteTimeDomainData(buf);
-          let sum = 0;
-          for (let i = 0; i < buf.length; i++) {
-            const s = (buf[i] - 128) / 128;
-            sum += s * s;
-          }
-          if (Math.sqrt(sum / buf.length) > THRESHOLD) {
-            active = false;
-            const activeTtsTurn = turns.find(t => ttsStates[t.id] && ttsStates[t.id] !== 'idle');
-            if (activeTtsTurn) stopTTS(activeTtsTurn.id);
-            // auto-restart effect opens the mic when masarState → idle
-            return;
-          }
-          rafId = requestAnimationFrame(detect);
-        };
-        rafId = requestAnimationFrame(detect);
-      } catch (e) {
-        console.warn('[barge-in] mic access failed:', e.message);
-      }
-    })();
-
-    return () => {
-      active = false;
-      if (rafId) cancelAnimationFrame(rafId);
-      ctx?.close().catch(() => {});
-      stream?.getTracks().forEach(t => t.stop());
-    };
-  }, [callActive, masarState]); // eslint-disable-line react-hooks/exhaustive-deps
+    return; // barge-in disabled - mic conflict
+  }, [callActive, masarState]);
 
   // ── Canvas refs ────────────────────────────────────────────────────────────
   const canvasRef        = useRef(null);
@@ -352,8 +318,8 @@ export default function Workspace() {
     const render = () => {
       const W = canvas.width, H = canvas.height, baseline = H / 2;
 
-      // Dark background + dot grid
-      ctx.fillStyle = '#010508';
+      // Background — respects theme
+      ctx.fillStyle = themeRef.current === 'light' ? '#F0F4F8' : '#010508';
       ctx.fillRect(0, 0, W, H);
       if (dotGridRef.current) ctx.drawImage(dotGridRef.current, 0, 0);
 
@@ -464,12 +430,22 @@ export default function Workspace() {
     setSolutions({});
     setSolvingIds({});
     setConversationHistory([]);
-    ttsTriggeredRef.current = new Set();
-    historyAddedRef.current = new Set();
+    setHasLastSpoken(false);
+    ttsTriggeredRef.current   = new Set();
+    historyAddedRef.current   = new Set();
+    lastSpokenRef.current     = null;
+    lastSpokenTurnRef.current = null;
     startTimeRef.current = Date.now();
   }
 
-  const callBusy = callActive && masarState === 'thinking';
+  const callBusy   = callActive && masarState === 'thinking';
+  const showReplay = hasLastSpoken && masarState === 'idle';
+
+  const handleReplay = () => {
+    if (lastSpokenRef.current && lastSpokenTurnRef.current !== null) {
+      playTTS(lastSpokenTurnRef.current, lastSpokenRef.current);
+    }
+  };
 
   // Latest Claude solution for the text panel (most recent turn with any solution)
   const latestSolution = (() => {
@@ -485,7 +461,7 @@ export default function Workspace() {
     : null;
 
   return (
-    <div style={{ height: '100vh', width: '100vw', position: 'relative', overflow: 'hidden', background: '#010508' }}>
+    <div style={{ height: '100vh', width: '100vw', position: 'relative', overflow: 'hidden', background: theme === 'light' ? '#F0F4F8' : '#010508' }}>
 
       {/* ── Full-screen canvas ── */}
       <canvas
@@ -576,8 +552,9 @@ export default function Workspace() {
       {/* ── Sidebar scrim ── */}
       {sidebarOpen && (
         <div
+          className="scrim-enter"
           onClick={() => setSidebarOpen(false)}
-          style={{ position: 'absolute', inset: 0, zIndex: 30 }}
+          style={{ position: 'absolute', inset: 0, zIndex: 30, background: 'rgba(0,0,0,0.3)' }}
         />
       )}
 
@@ -687,6 +664,7 @@ export default function Workspace() {
           >
             👁
           </TopBarBtn>
+          <ThemeToggle />
           <TopBarBtn onClick={() => navigate('/settings')} title="Settings">
             ⚙
           </TopBarBtn>
@@ -702,32 +680,62 @@ export default function Workspace() {
         background: 'linear-gradient(to top, rgba(1,5,8,0.75) 0%, transparent 100%)',
       }}>
 
-        <button
-          onClick={callActive ? endCall : startCall}
-          disabled={callBusy}
-          style={{
-            width: 72, height: 72, borderRadius: '50%',
-            border: callActive
-              ? '2px solid rgba(239,68,68,0.80)'
-              : '2px solid rgba(245,158,11,0.60)',
-            background: callActive
-              ? 'rgba(239,68,68,0.12)'
-              : 'rgba(245,158,11,0.08)',
-            color: callActive ? '#EF4444' : 'var(--masar-amber)',
-            fontSize: '1.6rem', lineHeight: 1,
-            cursor: callBusy ? 'not-allowed' : 'pointer',
-            opacity: callBusy ? 0.45 : 1,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            transition: 'border-color 300ms, background 300ms, opacity 300ms',
-            boxShadow: callActive
-              ? '0 0 0 8px rgba(239,68,68,0.07), 0 0 24px rgba(239,68,68,0.12)'
-              : '0 0 0 8px rgba(245,158,11,0.05), 0 0 24px rgba(245,158,11,0.08)',
-          }}
-        >
-          {callActive
-            ? <span style={{ transform: 'rotate(135deg)', display: 'inline-block' }}>📞</span>
-            : <span>🎙</span>}
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '1.25rem' }}>
+
+          {/* Replay button — left of mic, fades in when MASAR returns to idle */}
+          <button
+            onClick={handleReplay}
+            title="Replay last response"
+            style={{
+              width: 40, height: 40, borderRadius: '50%', flexShrink: 0,
+              border: '1px solid rgba(34,211,238,0.40)',
+              background: 'transparent',
+              color: 'var(--masar-cyan)',
+              fontSize: '1rem', lineHeight: 1,
+              cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              opacity: showReplay ? 1 : 0,
+              pointerEvents: showReplay ? 'auto' : 'none',
+              transition: 'opacity 300ms ease, background 200ms ease',
+            }}
+            onMouseEnter={e => { if (showReplay) e.currentTarget.style.background = 'rgba(34,211,238,0.10)'; }}
+            onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+          >
+            🔁
+          </button>
+
+          {/* Mic / End Call button */}
+          <button
+            onClick={callActive ? endCall : startCall}
+            disabled={callBusy}
+            style={{
+              width: 72, height: 72, borderRadius: '50%', flexShrink: 0,
+              border: callActive
+                ? '2px solid rgba(239,68,68,0.80)'
+                : '2px solid rgba(245,158,11,0.60)',
+              background: callActive
+                ? 'rgba(239,68,68,0.12)'
+                : 'rgba(245,158,11,0.08)',
+              color: callActive ? '#EF4444' : 'var(--masar-amber)',
+              fontSize: '1.6rem', lineHeight: 1,
+              cursor: callBusy ? 'not-allowed' : 'pointer',
+              opacity: callBusy ? 0.45 : 1,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              transition: 'border-color 300ms, background 300ms, opacity 300ms',
+              boxShadow: callActive
+                ? '0 0 0 8px rgba(239,68,68,0.07), 0 0 24px rgba(239,68,68,0.12)'
+                : '0 0 0 8px rgba(245,158,11,0.05), 0 0 24px rgba(245,158,11,0.08)',
+            }}
+          >
+            {callActive
+              ? <span style={{ transform: 'rotate(135deg)', display: 'inline-block' }}>📞</span>
+              : <span>🎙</span>}
+          </button>
+
+          {/* Spacer — mirrors replay width to keep mic centered */}
+          <div style={{ width: 40, height: 40, flexShrink: 0 }} />
+
+        </div>
 
         <span style={{
           fontFamily: 'var(--font-mono)', fontSize: '0.6875rem',

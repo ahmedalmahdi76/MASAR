@@ -1,4 +1,8 @@
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { supabase } from '../supabase';
+import Spinner from '../components/Spinner';
+import ThemeToggle from '../components/ThemeToggle';
 
 /*
  * STAGE 3 — Service Selection (Bento Grid v2)
@@ -174,6 +178,32 @@ const SERVICES = [
 
 export default function ServiceSelect() {
   const navigate = useNavigate();
+  const [user,      setUser]      = useState(undefined);
+  const [menuOpen,  setMenuOpen]  = useState(false);
+  const [clickedId, setClickedId] = useState(null);
+  const menuRef = useRef(null);
+
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data: { user } }) => setUser(user ?? null));
+  }, []);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const close = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [menuOpen]);
+
+  const isGuest = user === null && !!localStorage.getItem('masar_guest');
+
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    localStorage.removeItem('masar_guest');
+    localStorage.removeItem('masar_token');
+    navigate('/auth');
+  };
 
   return (
     <div style={{
@@ -270,13 +300,63 @@ export default function ServiceSelect() {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
           <span className="mono-sm text-muted">Select a service to begin</span>
-          <div style={{
-            width: 30, height: 30, borderRadius: '50%',
-            background: 'var(--masar-elevated)', border: '1px solid var(--masar-border-mid)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontFamily: 'Syne, sans-serif', fontWeight: 700,
-            fontSize: '0.8125rem', color: 'var(--masar-amber)', cursor: 'pointer',
-          }}>A</div>
+          <ThemeToggle />
+          <div ref={menuRef} style={{ position: 'relative' }}>
+            <div
+              onClick={() => setMenuOpen(v => !v)}
+              style={{
+                width: 30, height: 30, borderRadius: '50%',
+                background: menuOpen ? 'var(--masar-border-mid)' : 'var(--masar-elevated)',
+                border: '1px solid var(--masar-border-mid)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontFamily: isGuest ? 'Cairo, sans-serif' : 'Syne, sans-serif',
+                fontWeight: 700, fontSize: '0.8125rem',
+                color: 'var(--masar-amber)', cursor: 'pointer',
+                transition: 'background var(--duration-fast)', userSelect: 'none',
+              }}
+            >
+              {isGuest ? 'ض' : (user?.email?.[0] ?? '?').toUpperCase()}
+            </div>
+
+            {menuOpen && (
+              <div style={{
+                position: 'absolute', top: 'calc(100% + 8px)', right: 0,
+                width: 220, zIndex: 100,
+                background: 'var(--masar-surface)',
+                border: '1px solid var(--masar-border)',
+                borderRadius: 'var(--radius-md)', overflow: 'hidden',
+                boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+              }}>
+                <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid var(--masar-border)' }}>
+                  <p style={{
+                    fontFamily: 'Cairo, sans-serif', fontSize: '0.8rem',
+                    color: 'var(--masar-muted)', direction: 'rtl', textAlign: 'right',
+                    margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}>
+                    {isGuest ? 'ضيف' : (user?.email ?? '')}
+                  </p>
+                </div>
+
+                <MenuBtn onClick={() => { setMenuOpen(false); navigate('/settings'); }}>
+                  <span style={{ fontFamily: 'Cairo, sans-serif', fontSize: '0.875rem', color: '#E2E8F0' }}>الإعدادات</span>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--masar-muted)' }}>⚙</span>
+                </MenuBtn>
+
+                {isGuest ? (
+                  <MenuBtn onClick={() => { setMenuOpen(false); navigate('/auth'); }}>
+                    <span style={{ fontFamily: 'Cairo, sans-serif', fontSize: '0.875rem', color: 'var(--masar-amber)' }}>إنشاء حساب</span>
+                  </MenuBtn>
+                ) : (
+                  <>
+                    <div style={{ height: '1px', background: 'var(--masar-border)' }} />
+                    <MenuBtn onClick={() => { setMenuOpen(false); handleSignOut(); }} danger>
+                      <span style={{ fontFamily: 'Cairo, sans-serif', fontSize: '0.875rem', color: '#EF4444' }}>تسجيل الخروج</span>
+                    </MenuBtn>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
@@ -308,7 +388,7 @@ export default function ServiceSelect() {
       {/* ── Bento Grid ── */}
       <div style={{ position: 'relative', zIndex: 5, flex: 1, padding: '0.75rem 1.75rem 1.25rem', overflow: 'hidden' }}>
         <div
-          className="bento-grid"
+          className="bento-grid page-enter"
           style={{
             display: 'grid',
             gridTemplateColumns: 'repeat(6, 1fr)',
@@ -321,7 +401,12 @@ export default function ServiceSelect() {
             <BentoCard
               key={service.id}
               service={service}
-              onClick={() => navigate('/workspace', { state: { service } })}
+              loading={clickedId === service.id}
+              onClick={() => {
+                if (clickedId) return;
+                setClickedId(service.id);
+                setTimeout(() => navigate('/workspace', { state: { service } }), 260);
+              }}
             />
           ))}
         </div>
@@ -330,13 +415,34 @@ export default function ServiceSelect() {
   );
 }
 
+/* ── Menu Button ── */
+
+function MenuBtn({ children, onClick, danger }) {
+  return (
+    <button type="button" onClick={onClick}
+      style={{
+        width: '100%', padding: '0.7rem 1rem',
+        background: 'transparent', border: 'none',
+        display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
+        gap: '0.5rem', cursor: 'pointer',
+        transition: 'background var(--duration-fast)',
+      }}
+      onMouseEnter={e => e.currentTarget.style.background = danger ? 'rgba(239,68,68,0.07)' : 'var(--masar-elevated)'}
+      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+    >
+      {children}
+    </button>
+  );
+}
+
 /* ── Bento Card ── */
 
-function BentoCard({ service, onClick }) {
+function BentoCard({ service, onClick, loading }) {
   return (
     <button
       onClick={onClick}
       className="bento-card"
+      disabled={loading}
       style={{
         gridColumn: service.col,
         gridRow: service.row,
@@ -344,15 +450,13 @@ function BentoCard({ service, onClick }) {
         border: '1px solid var(--masar-border)',
         font: 'inherit',
         textAlign: 'left',
+        opacity: loading ? 0.6 : 1,
+        transition: 'opacity 200ms ease, border-color 220ms ease, transform 220ms ease, box-shadow 220ms ease',
       }}
-      onMouseEnter={e => {
-        e.currentTarget.style.borderColor = service.accent;
-      }}
-      onMouseLeave={e => {
-        e.currentTarget.style.borderColor = 'var(--masar-border)';
-      }}
+      onMouseEnter={e => { if (!loading) e.currentTarget.style.borderColor = service.accent; }}
+      onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--masar-border)'; }}
     >
-      {/* Top row — icon + arrow */}
+      {/* Top row — icon + arrow/spinner */}
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
         <span style={{
           fontFamily: 'IBM Plex Mono, monospace',
@@ -362,7 +466,10 @@ function BentoCard({ service, onClick }) {
         }}>
           {service.icon}
         </span>
-        <span className="card-arrow" style={{ color: service.accent }}>↗</span>
+        {loading
+          ? <Spinner size={14} />
+          : <span className="card-arrow" style={{ color: service.accent }}>↗</span>
+        }
       </div>
 
       {/* Bottom — labels */}

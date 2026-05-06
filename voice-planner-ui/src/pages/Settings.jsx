@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabase';
+import Spinner from '../components/Spinner';
+import ThemeToggle from '../components/ThemeToggle';
 
 const VAD_OPTIONS = [
   { value: 'low',          ar: 'منخفض' },
@@ -25,15 +27,16 @@ export default function Settings() {
   const [tech, setTech] = useState(() => localStorage.getItem('masar_tech_level') ?? 'Professional');
 
   // Account
-  const [user,      setUser]      = useState(undefined); // undefined = loading
-  const [currentPw, setCurrentPw] = useState('');
-  const [newPw,     setNewPw]     = useState('');
-  const [confirmPw, setConfirmPw] = useState('');
-  const [showCurPw, setShowCurPw] = useState(false);
-  const [showNewPw, setShowNewPw] = useState(false);
-  const [showConPw, setShowConPw] = useState(false);
-  const [pwMsg,     setPwMsg]     = useState('');
-  const [pwLoading, setPwLoading] = useState(false);
+  const [user,          setUser]          = useState(undefined);
+  const [currentPw,     setCurrentPw]     = useState('');
+  const [newPw,         setNewPw]         = useState('');
+  const [confirmPw,     setConfirmPw]     = useState('');
+  const [showCurPw,     setShowCurPw]     = useState(false);
+  const [showNewPw,     setShowNewPw]     = useState(false);
+  const [showConPw,     setShowConPw]     = useState(false);
+  const [pwMsg,         setPwMsg]         = useState('');
+  const [pwLoading,     setPwLoading]     = useState(false);
+  const [signoutLoading,setSignoutLoading]= useState(false);
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data: { user } }) => setUser(user ?? null));
@@ -69,6 +72,7 @@ export default function Settings() {
   };
 
   const handleSignOut = async () => {
+    setSignoutLoading(true);
     await supabase.auth.signOut();
     localStorage.removeItem('masar_guest');
     localStorage.removeItem('masar_token');
@@ -93,14 +97,15 @@ export default function Settings() {
         <button onClick={() => navigate(-1)} style={{ background: 'transparent', border: '1px solid var(--masar-border)', color: 'var(--masar-muted)', borderRadius: 'var(--radius-md)', padding: '0.375rem 0.75rem', cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: '0.75rem' }}>
           ← Back
         </button>
-        <span style={{ color: 'var(--masar-amber)', fontSize: '0.75rem', letterSpacing: '0.12em', textTransform: 'uppercase' }}>Settings</span>
+        <span style={{ color: 'var(--masar-amber)', fontSize: '0.75rem', letterSpacing: '0.12em', textTransform: 'uppercase', flex: 1 }}>Settings</span>
+        <ThemeToggle />
       </div>
 
-      <div style={{ flex: 1, padding: '2rem 1.5rem', maxWidth: 480, margin: '0 auto', width: '100%' }}>
+      <div className="page-enter" style={{ flex: 1, padding: '2rem 1.5rem', maxWidth: 480, margin: '0 auto', width: '100%' }}>
 
         {/* Account info — real users only */}
         {user && !isGuest && (
-          <section style={{ marginBottom: '2.5rem' }}>
+          <section className="settings-section" style={{ marginBottom: '2.5rem' }}>
             <p style={arLabel}>معلومات الحساب</p>
             <div style={{ background: 'var(--masar-surface)', border: '1px solid var(--masar-border)', borderRadius: 'var(--radius-md)', overflow: 'hidden' }}>
               <InfoRow label="الإيميل" value={user.email} />
@@ -111,7 +116,7 @@ export default function Settings() {
         )}
 
         {/* VAD */}
-        <section style={{ marginBottom: '2.5rem' }}>
+        <section className="settings-section" style={{ marginBottom: '2.5rem' }}>
           <p style={arLabel}>حساسية الميكروفون</p>
           <div style={{ display: 'flex', gap: '0.5rem' }}>
             {VAD_OPTIONS.map(o => (
@@ -121,7 +126,7 @@ export default function Settings() {
         </section>
 
         {/* Tech level */}
-        <section style={{ marginBottom: '2.5rem' }}>
+        <section className="settings-section" style={{ marginBottom: '2.5rem' }}>
           <p style={arLabel}>مستوى التفاصيل</p>
           <div style={{ display: 'flex', gap: '0.5rem' }}>
             {TECH_OPTIONS.map(o => (
@@ -132,7 +137,7 @@ export default function Settings() {
 
         {/* Change password — email users only */}
         {user && isEmailUser && !isGuest && (
-          <section style={{ marginBottom: '2.5rem' }}>
+          <section className="settings-section" style={{ marginBottom: '2.5rem' }}>
             <p style={arLabel}>تغيير كلمة المرور</p>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
               <PwField placeholder="كلمة المرور الحالية"    value={currentPw} onChange={e => setCurrentPw(e.target.value)} show={showCurPw} onToggle={() => setShowCurPw(v => !v)} />
@@ -146,16 +151,16 @@ export default function Settings() {
               <button
                 onClick={handleChangePassword}
                 disabled={pwLoading}
-                style={{ width: '100%', padding: '0.75rem', background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.5)', borderRadius: 'var(--radius-md)', color: 'var(--masar-amber)', fontFamily: 'Cairo, sans-serif', fontSize: '0.9rem', cursor: pwLoading ? 'wait' : 'pointer', opacity: pwLoading ? 0.7 : 1, transition: 'opacity var(--duration-fast)' }}
+                style={{ width: '100%', padding: '0.75rem', background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.5)', borderRadius: 'var(--radius-md)', color: 'var(--masar-amber)', fontFamily: 'Cairo, sans-serif', fontSize: '0.9rem', cursor: pwLoading ? 'wait' : 'pointer', opacity: pwLoading ? 0.7 : 1, transition: 'opacity var(--duration-fast)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}
               >
-                {pwLoading ? '...' : 'تغيير كلمة المرور'}
+                {pwLoading ? <><Spinner size={14} /> جاري التغيير...</> : 'تغيير كلمة المرور'}
               </button>
             </div>
           </section>
         )}
 
         {/* Sign out / Create account */}
-        <section>
+        <section className="settings-section">
           {isGuest ? (
             <button
               onClick={() => navigate('/auth')}
@@ -168,11 +173,12 @@ export default function Settings() {
           ) : (
             <button
               onClick={handleSignOut}
-              style={{ width: '100%', padding: '0.75rem', background: 'transparent', border: '1px solid rgba(239,68,68,0.4)', borderRadius: 'var(--radius-md)', color: '#EF4444', fontFamily: 'Cairo, sans-serif', fontSize: '0.9rem', cursor: 'pointer', transition: 'border-color var(--duration-base), background var(--duration-base)' }}
-              onMouseEnter={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.08)'; e.currentTarget.style.borderColor = 'rgba(239,68,68,0.7)'; }}
-              onMouseLeave={e => { e.currentTarget.style.background = 'transparent';            e.currentTarget.style.borderColor = 'rgba(239,68,68,0.4)'; }}
+              disabled={signoutLoading}
+              style={{ width: '100%', padding: '0.75rem', background: 'transparent', border: '1px solid rgba(239,68,68,0.4)', borderRadius: 'var(--radius-md)', color: '#EF4444', fontFamily: 'Cairo, sans-serif', fontSize: '0.9rem', cursor: signoutLoading ? 'wait' : 'pointer', opacity: signoutLoading ? 0.7 : 1, transition: 'border-color var(--duration-base), background var(--duration-base)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}
+              onMouseEnter={e => { if (!signoutLoading) { e.currentTarget.style.background = 'rgba(239,68,68,0.08)'; e.currentTarget.style.borderColor = 'rgba(239,68,68,0.7)'; } }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = 'rgba(239,68,68,0.4)'; }}
             >
-              تسجيل الخروج
+              {signoutLoading ? <><Spinner size={14} /> جاري الخروج...</> : 'تسجيل الخروج'}
             </button>
           )}
         </section>
