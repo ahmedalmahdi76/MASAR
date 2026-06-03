@@ -159,13 +159,6 @@ export default function AuthPage() {
 
           <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '0.875rem' }}>
 
-            {mode === 'signup' && (
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
-                <AuthInput placeholder="First name" />
-                <AuthInput placeholder="Last name" />
-              </div>
-            )}
-
             <AuthInput
               placeholder="Email address" type="email"
               value={email} onChange={e => setEmail(e.target.value)}
@@ -179,8 +172,6 @@ export default function AuthPage() {
               showPw={showPassword}
               onToggle={() => setShowPassword(v => !v)}
             />
-
-            {mode === 'signup' && <AuthInput placeholder="Region (e.g. Cairo)" />}
 
             {/* Forgot Password — signin only */}
             {mode === 'signin' && (
@@ -382,7 +373,7 @@ function PasswordField({ placeholder, value, onChange, showPw, onToggle }) {
   );
 }
 
-function AuthInput({ placeholder, type = 'text', value, onChange }) {
+function AuthInput({ placeholder, type = 'text', value = '', onChange = () => {} }) {
   return (
     <input
       type={type} placeholder={placeholder}

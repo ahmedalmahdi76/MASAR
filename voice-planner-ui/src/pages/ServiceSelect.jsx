@@ -3,6 +3,34 @@ import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabase';
 import Spinner from '../components/Spinner';
 import ThemeToggle from '../components/ThemeToggle';
+import OnboardingTour from '../components/OnboardingTour';
+
+const TOUR_STEPS_SERVICES = [
+  {
+    targetId:    null,
+    title:       'أهلاً في مسار 🔶',
+    description: 'مسار هو مساعدك الذكي لتخطيط شبكات الاتصالات. خليني أريك كيف تستخدمه.',
+    position:    'bottom',
+  },
+  {
+    targetId:    'service-grid',
+    title:       'اختار خدمتك',
+    description: 'كل كارت بيمثل تخصص هندسي مختلف. اختار الخدمة اللي محتاجها وابدأ المحادثة.',
+    position:    'bottom',
+  },
+  {
+    targetId:    'user-menu-btn',
+    title:       'حسابك',
+    description: 'من هنا تقدر توصل لإعداداتك، تغير كلمة المرور، أو تسجل الخروج.',
+    position:    'bottom',
+  },
+  {
+    targetId:    'theme-toggle-btn',
+    title:       'الوضع الليلي والنهاري',
+    description: 'غير المظهر حسب راحتك — وضع مظلم أو فاتح.',
+    position:    'bottom',
+  },
+];
 
 /*
  * STAGE 3 — Service Selection (Bento Grid v2)
@@ -181,11 +209,22 @@ export default function ServiceSelect() {
   const [user,      setUser]      = useState(undefined);
   const [menuOpen,  setMenuOpen]  = useState(false);
   const [clickedId, setClickedId] = useState(null);
+  const [showTour,  setShowTour]  = useState(false);
   const menuRef = useRef(null);
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data: { user } }) => setUser(user ?? null));
   }, []);
+
+  useEffect(() => {
+    const done = localStorage.getItem('masar_tour_services');
+    if (!done) setShowTour(true);
+  }, []);
+
+  const completeTour = () => {
+    localStorage.setItem('masar_tour_services', 'done');
+    setShowTour(false);
+  };
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -300,9 +339,10 @@ export default function ServiceSelect() {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
           <span className="mono-sm text-muted">Select a service to begin</span>
-          <ThemeToggle />
+          <span id="theme-toggle-btn"><ThemeToggle /></span>
           <div ref={menuRef} style={{ position: 'relative' }}>
             <div
+              id="user-menu-btn"
               onClick={() => setMenuOpen(v => !v)}
               style={{
                 width: 30, height: 30, borderRadius: '50%',
@@ -388,6 +428,7 @@ export default function ServiceSelect() {
       {/* ── Bento Grid ── */}
       <div style={{ position: 'relative', zIndex: 5, flex: 1, padding: '0.75rem 1.75rem 1.25rem', overflow: 'hidden' }}>
         <div
+          id="service-grid"
           className="bento-grid page-enter"
           style={{
             display: 'grid',
@@ -411,6 +452,13 @@ export default function ServiceSelect() {
           ))}
         </div>
       </div>
+      {showTour && (
+        <OnboardingTour
+          steps={TOUR_STEPS_SERVICES}
+          onComplete={completeTour}
+          onSkip={completeTour}
+        />
+      )}
     </div>
   );
 }

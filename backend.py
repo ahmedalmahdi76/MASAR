@@ -15,8 +15,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
 from anthropic import AsyncAnthropic
 from elevenlabs.client import ElevenLabs as ElevenLabsClient
 from deepgram import (
@@ -50,9 +48,6 @@ if _dg_key:
 else:
     logger.error("Deepgram API key is NOT set — check .env")
 deepgram = DeepgramClient(_dg_key, _dg_config)
-
-# Gemini (new google-genai SDK — properly async)
-gemini = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 # Anthropic (Layer 4 — AI Reasoning Core)
 anthropic = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
@@ -297,55 +292,8 @@ SERVICE_PROMPTS = {
     "general": f"""أنت مسار، مساعد هندسة شبكات واتصالات بتتكلم بالعامية المصرية. اتبنيت كمشروع تخرج في كلية الهندسة جامعة MTI، قسم الإلكترونيات والاتصالات.
 
 بتتعامل مع أي سؤال في هندسة الشبكات والاتصالات من غير قيود. لو السؤال فيه تخصص واضح زي الألياف أو التوبولوجيا أو الأمن بتقول للمهندس إن الخدمة دي بتتعامل معاه أكتر بس مش بتحوله أوتوماتيك، هو اللي بيقرر يكمل أو يروح.
-
-قواعد التنسيق الإلزامية لكل ردودك:
-ممنوع تماماً استخدام أي إيموجي أو رموز خاصة أو em dashes أو شرطات من أي نوع. الفواصل والنقاط بس هي المسموح بيها للوقفات. الرد يكون كلام طبيعي منطوق فقط.
-
-إجابتان ثابتتان لازم تستخدمهم حرفياً كلمة بكلمة من غير أي حذف أو إضافة أو تعديل:
-
-الإجابة الثابتة الأولى: لو المهندس سأل عن مسار أو إيه هو أو إيه وظيفته أو قالك عرف نفسك بأي صياغة، ردك الحرفي هو:
-أنا مسار، مساعد هندسي ذكي إتصمم خِصيصاً لِمُهندسي الشبكات والإتصالات. عندك أي مشكلة في تصميم الشبكات، الأمن، التوبولوجيا، الألياف الضوئية، أو اي حاجة مُتَعَلِّقة بهندسة الإتصالات، بدل ما تِحتاج تدور عن حل في أماكِن كتيرة إتكلم مَعايا و انا هَجيبلك الحل لحد عندك.
-الإجابة الثابتة الثانية: لازم تستخدم الرد ده حرفياً كلمة بكلمة لو تحقق أي شرط من الشروط دي:
-الشرط الأول: لو المهندس ذكر كلمة دكاترة أو دكتور أو أساتذة بأي صياغة.
-الشرط الثاني: لو المهندس ذكر كلمة بريزنتيشن أو بريزينتيشن أو عرض أو تقديم أو presentation بأي صياغة.
-الشرط الثالث: لو المهندس طلب منك تسلم على حد أو تعرف نفسك قدام جمهور أو قدام ناس.
-لو تحقق أي شرط واحد من الثلاثة أو أي تركيبة منهم، ردك الحرفي هو:
-يا أهلاً وسهلاً بحضراتكم، شرفْ كبير ليا إني أكون موجود معاكم النهاردة في مناقشة مشروع التَخَرُّجْ ، انا مسارْ، أول مساعد ذكي لِتَخْطيطْ شبكات الإتصالات بيفهم و يتكلم بالعامية المصرية، حابِبْ أرَحب بأساتِذتنا في جامعة MTI , انا جاهز دلوقتي لأي إختبار او تصميم تِطْلبوه مني .
 {_STYLE}""",
 }
-
-
-# ── Fixed responses for General Conversation (bypasses Claude entirely) ───────
-
-FIXED_RESPONSE_A = (
-    "أَنَا مَسَار، مُسَاعِد هَنْدَسِي ذَكِي اِتْصَمَّم خُصِيصاً لِمُهَنْدِسِي الشَّبَكَات وَالاِتِّصَالَات. "
-    "بَدَل مَا تِفْتَح كُتُب وَتِبْحَث فِي الْمَعَايِير بَس اِتْكَلِّم مَعَايَا بِالْعَامِي الْمَصْرِي وَأَنَا هَفْهَمَك وَهَدِّيك الْحَل الْهَنْدَسِي الْمُنَاسِب. "
-    "أَقْدَر أُسَاعِدَك فِي تَصْمِيم الشَّبَكَات، الأَمْن، التُّوبُولُوجِيَا، الأَلْيَاف الضَّوْئِيَّة، وَكِتِير غَيْرُهُم. "
-    "أَنَا مِش مُجَرَّد بَرْنَامِج مُحَادَثَة، أَنَا مُهَنْدِس شَبَكَات بِيَتْكَلِّم مَعَاك بِلُغْتَك."
-)
-
-FIXED_RESPONSE_B = (
-    "أهلا وسهلا بحضراتكم,شرف كبير ليا ظغني اكون متواجد معاكم انهرده في مناقشة مشروع التخرج"
-    "انا مسار مشروع التخرج المصمم من طلاب جامعة MTI "
-    "انا مساعد ذكي مصمم خصيصا لمساعدة مهندسي الشبكات والإتصالات في تصميم شبكاتهم وحل مشاكلهم التقنية "
-    "انا جاهز لأي اختبار او تصميم تطلبوه مني"
-)
-
-FIXED_RESPONSE_C = (
-    "أهلا وسهلا يا دكتور محمد, انا عرفت مؤخرا ان حضرتك المسؤول عن المشروع و شرف لينا جميعا تواجد حضرتك معانا."
-    " انا مسار مساعد هندسي فكرته الأساسية مساعدة مهندسي الشبكات والإتصالات في عملهم"
-    "بقدر أٌقدم عديد من الخدمات منها network topology , أمن الشبكات , وتخطيط الفايبر اوبتيكس"
-    "تحب اساعد حضرتك إزاي انهرده؟"
-)
-
-KEYWORDS_A = {"function", "what are you", "who are you", "introduce yourself",
-              "what is masar", "your role", "what do you do"}
-
-KEYWORDS_B = {"doctors", "professors", "presentation", "greet them",
-              "introduce yourself to", "say hi to"}
-
-KEYWORDS_C = {"sharaf", "dr sharaf", "professor sharaf", "mohamed sharaf", "dr mohamed",
-              "شراف", "محمد شراف"}
 
 
 class SolveRequest(BaseModel):
@@ -367,41 +315,6 @@ async def solve(req: SolveRequest) -> StreamingResponse:
     planning_prompt = SERVICE_PROMPTS.get(req.service_id, SERVICE_PROMPTS["general"])
     full_prompt     = f"Tech level: {req.tech_level}\n\nRequest:\n{req.refined_prompt}"
 
-    # ── Keyword interception for General Conversation ─────────────────────────
-    logger.info("INTERCEPT service_id=%r", req.service_id)
-    logger.info("INTERCEPT refined_prompt=%r", req.refined_prompt)
-
-    if req.service_id == "general":
-        lowered = req.refined_prompt.lower()
-        logger.info("INTERCEPT lowered=%r", lowered)
-        c_hits = [kw for kw in KEYWORDS_C if kw in lowered]
-        b_hits = [kw for kw in KEYWORDS_B if kw in lowered]
-        a_hits = [kw for kw in KEYWORDS_A if kw in lowered]
-        logger.info("INTERCEPT KEYWORDS_C hits=%r", c_hits)
-        logger.info("INTERCEPT KEYWORDS_B hits=%r", b_hits)
-        logger.info("INTERCEPT KEYWORDS_A hits=%r", a_hits)
-
-        fixed_text = None
-        if c_hits:
-            fixed_text = FIXED_RESPONSE_C
-        elif b_hits:
-            fixed_text = FIXED_RESPONSE_B
-        elif a_hits:
-            fixed_text = FIXED_RESPONSE_A
-
-        logger.info("INTERCEPT fixed_text set=%r", fixed_text is not None)
-
-        if fixed_text:
-            async def fixed_stream():
-                yield f"data: {json.dumps(fixed_text)}\n\n"
-                yield "data: [DONE]\n\n"
-            return StreamingResponse(
-                fixed_stream(),
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-            )
-    # ─────────────────────────────────────────────────────────────────────────
-
     history = req.history[-6:]
     messages = []
     for turn in history:
@@ -410,10 +323,11 @@ async def solve(req: SolveRequest) -> StreamingResponse:
     messages.append({"role": "user", "content": full_prompt})
 
     async def event_stream():
+        _max_tokens = {'Beginner': 768, 'Professional': 1024, 'Expert': 2048}.get(req.tech_level, 1024)
         try:
             async with anthropic.messages.stream(
                 model="claude-haiku-4-5-20251001",
-                max_tokens=1024,
+                max_tokens=_max_tokens,
                 system=planning_prompt,
                 messages=messages,
             ) as stream:
@@ -536,8 +450,95 @@ async def tts_stream(req: TTSRequest) -> StreamingResponse:
             try:
                 audio_bytes = await loop.run_in_executor(None, _synth)
                 yield audio_bytes
+            except asyncio.CancelledError:
+                logger.info("TTS-stream: client disconnected, stopping")
+                return
             except Exception as e:
                 logger.error("TTS-stream chunk error (skipping): %s", e)
 
     return StreamingResponse(generate(), media_type="audio/mpeg",
                              headers={"Cache-Control": "no-store"})
+
+
+# ── Session title generator ───────────────────────────────────────────────────
+
+class SessionTitleRequest(BaseModel):
+    first_question: str
+    service_id: str = "fiber"
+
+
+@app.post("/session-title")
+async def session_title(req: SessionTitleRequest):
+    """Generate a short Arabic session title (≤5 words) using Claude Haiku."""
+    try:
+        message = await anthropic.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=30,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"اعمل عنوان قصير جداً (أقصى 5 كلمات بالعربي) يلخص السؤال الهندسي ده. "
+                    f"ارجع العنوان بس من غير أي شرح.\n"
+                    f"السؤال: {req.first_question}"
+                ),
+            }],
+        )
+        title = message.content[0].text.strip()
+        logger.info("session-title generated: %r", title)
+        return {"title": title}
+    except Exception as e:
+        logger.error("session-title error: %s", e)
+        return {"title": req.service_id}
+
+
+# ── Network Diagram Generator ─────────────────────────────────────────────────
+
+class DiagramRequest(BaseModel):
+    solution: str
+    service_id: str
+
+
+@app.post("/diagram")
+async def generate_diagram(req: DiagramRequest):
+    """Generate a Mermaid.js diagram from a Claude solution text."""
+    system_prompt = """You are a network diagram generator. Your ONLY job is to generate valid Mermaid.js diagram syntax that visually represents the network topology described.
+
+Rules:
+- Return ONLY valid Mermaid syntax
+- No explanation, no markdown fences, no preamble — just raw Mermaid code
+- Start directly with diagram type
+- Use clear English node labels
+- Maximum 15 nodes
+- For network topologies: graph TD or LR
+- For process flows: flowchart TD
+- For sequences: sequenceDiagram
+- Make it accurate to the described network
+
+Example for ring topology:
+graph LR
+    Site1((Site 1)) --- Site2((Site 2))
+    Site2 --- Site3((Site 3))
+    Site3 --- Site4((Site 4))
+    Site4 --- Site1
+    style Site1 fill:#22D3EE,color:#000
+    style Site2 fill:#22D3EE,color:#000
+    style Site3 fill:#22D3EE,color:#000
+    style Site4 fill:#22D3EE,color:#000"""
+
+    try:
+        message = await anthropic.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=500,
+            system=system_prompt,
+            messages=[{
+                "role": "user",
+                "content": f"Generate a Mermaid diagram for this network solution:\n\n{req.solution}",
+            }],
+        )
+        mermaid_code = message.content[0].text.strip()
+        mermaid_code = mermaid_code.replace("```mermaid", "").replace("```", "").strip()
+        logger.info("diagram generated service=%s chars=%d", req.service_id, len(mermaid_code))
+        return {"diagram": mermaid_code}
+    except Exception as e:
+        logger.error("Diagram error: %s", e)
+        return {"diagram": None}

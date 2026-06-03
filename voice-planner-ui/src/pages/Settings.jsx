@@ -159,6 +159,29 @@ export default function Settings() {
           </section>
         )}
 
+        {/* Tour replay */}
+        <section className="settings-section" style={{ marginBottom: '2.5rem' }}>
+          <p style={arLabel}>الجولة التعريفية</p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.625rem' }}>
+            <button
+              onClick={() => { localStorage.removeItem('masar_tour_services'); navigate('/services'); }}
+              style={{ width: '100%', padding: '0.75rem', background: 'rgba(34,211,238,0.07)', border: '1px solid rgba(34,211,238,0.35)', borderRadius: 'var(--radius-md)', color: '#22D3EE', fontFamily: 'Cairo, sans-serif', fontSize: '0.9rem', cursor: 'pointer', transition: 'border-color var(--duration-base), background var(--duration-base)' }}
+              onMouseEnter={e => { e.currentTarget.style.background = 'rgba(34,211,238,0.13)'; e.currentTarget.style.borderColor = 'rgba(34,211,238,0.65)'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'rgba(34,211,238,0.07)'; e.currentTarget.style.borderColor = 'rgba(34,211,238,0.35)'; }}
+            >
+              إعادة جولة اختيار الخدمة
+            </button>
+            <button
+              onClick={() => { localStorage.removeItem('masar_tour_workspace'); navigate(-1); }}
+              style={{ width: '100%', padding: '0.75rem', background: 'rgba(34,211,238,0.07)', border: '1px solid rgba(34,211,238,0.35)', borderRadius: 'var(--radius-md)', color: '#22D3EE', fontFamily: 'Cairo, sans-serif', fontSize: '0.9rem', cursor: 'pointer', transition: 'border-color var(--duration-base), background var(--duration-base)' }}
+              onMouseEnter={e => { e.currentTarget.style.background = 'rgba(34,211,238,0.13)'; e.currentTarget.style.borderColor = 'rgba(34,211,238,0.65)'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'rgba(34,211,238,0.07)'; e.currentTarget.style.borderColor = 'rgba(34,211,238,0.35)'; }}
+            >
+              إعادة جولة مساحة العمل
+            </button>
+          </div>
+        </section>
+
         {/* Sign out / Create account */}
         <section className="settings-section">
           {isGuest ? (

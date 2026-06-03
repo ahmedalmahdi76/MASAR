@@ -35,15 +35,17 @@ export function useAudioStream() {
   // Mutable ref read by the component's rAF loop — no re-renders per frame
   const audioLevelRef = useRef(0); // 0.0 – 1.0, normalised amplitude
 
-  const wsRef           = useRef(null);
-  const audioCtxRef     = useRef(null);
-  const workletRef      = useRef(null);
-  const analyserRef     = useRef(null);
-  const rafRef          = useRef(null);
-  const streamRef       = useRef(null);
-  const activeTurnIdRef = useRef(null);
+  const wsRef                = useRef(null);
+  const audioCtxRef          = useRef(null);
+  const workletRef           = useRef(null);
+  const analyserRef          = useRef(null);
+  const rafRef               = useRef(null);
+  const streamRef            = useRef(null);
+  const activeTurnIdRef      = useRef(null);
+  const stateChangeHandlerRef = useRef(null);
 
   const startRecording = useCallback(async () => {
+    if (isRecording) return;
     setError(null);
     const turnId = Date.now();
 
@@ -70,7 +72,13 @@ export function useAudioStream() {
 
       const audioCtx = new AudioContext();
       audioCtxRef.current = audioCtx;
-      if (audioCtx.state === 'suspended') await audioCtx.resume();
+      const stateChangeHandler = () => {
+        if (audioCtx.state === 'suspended' && analyserRef.current) {
+          audioCtx.resume().catch(() => {});
+        }
+      };
+      stateChangeHandlerRef.current = stateChangeHandler;
+      audioCtx.addEventListener('statechange', stateChangeHandler);
       const sampleRate = audioCtx.sampleRate;
 
       const ws = new WebSocket(`${BACKEND_WS}?sample_rate=${sampleRate}`);
@@ -130,18 +138,25 @@ export function useAudioStream() {
           sumSq += s * s;
         }
         const rms = Math.sqrt(sumSq / timeDomainBuffer.length);
-        console.log('[VAD rAF] rms=', rms.toFixed(4));
         audioLevelRef.current = Math.min(1, rms / LEVEL_MAX);
         setIsSpeaking(rms > VAD_THRESHOLD);
         rafRef.current = requestAnimationFrame(detectVoice);
       };
       rafRef.current = requestAnimationFrame(detectVoice);
 
-      // Correct order: source → analyser (in-path) → workletNode → destination
+      // Correct order: source → analyser (in-path) → workletNode → silentGain → destination
+      // GainNode at 0 gives Chrome a real output path (prevents auto-suspend) with no audible echo
       const source = audioCtx.createMediaStreamSource(stream);
+      const silentGain = audioCtx.createGain();
+      silentGain.gain.value = 0.001;
       source.connect(analyser);
       analyser.connect(workletNode);
-      workletNode.connect(audioCtx.destination);
+      workletNode.connect(silentGain);
+      silentGain.connect(audioCtx.destination);
+
+      if (audioCtx.state === 'suspended') {
+        await audioCtx.resume();
+      }
 
       setIsRecording(true);
     } catch (err) {
@@ -149,6 +164,8 @@ export function useAudioStream() {
       setError(err.message || 'Failed to start recording');
       setTurns(prev => prev.filter(t => t.id !== turnId));
       activeTurnIdRef.current = null;
+      wsRef.current?.close();
+      wsRef.current = null;
       streamRef.current?.getTracks().forEach(t => t.stop());
       if (audioCtxRef.current?.state !== 'closed') audioCtxRef.current?.close();
       audioCtxRef.current = null;
@@ -179,6 +196,10 @@ export function useAudioStream() {
 
     workletRef.current?.disconnect();
     workletRef.current?.port.close();
+    if (stateChangeHandlerRef.current) {
+      audioCtxRef.current?.removeEventListener('statechange', stateChangeHandlerRef.current);
+      stateChangeHandlerRef.current = null;
+    }
     await audioCtxRef.current?.close();
     streamRef.current?.getTracks().forEach(t => t.stop());
     audioCtxRef.current = null;

@@ -10,18 +10,24 @@
  */
 
 class PcmProcessor extends AudioWorkletProcessor {
-  process(inputs) {
-    const channel = inputs[0]?.[0];
-    if (!channel) return true;
+  process(inputs, outputs) {
+    const input  = inputs[0]?.[0];
+    const output = outputs[0]?.[0];
 
-    const int16 = new Int16Array(channel.length);
-    for (let i = 0; i < channel.length; i++) {
-      const s = Math.max(-1, Math.min(1, channel[i]));
-      int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    if (input && output) {
+      output.set(input); // pass-through keeps Chrome from suspending the context
     }
 
-    // Transfer the buffer (zero-copy) to the main thread
-    this.port.postMessage(int16.buffer, [int16.buffer]);
+    if (input) {
+      const int16 = new Int16Array(input.length);
+      for (let i = 0; i < input.length; i++) {
+        const s = Math.max(-1, Math.min(1, input[i]));
+        int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      // Transfer the buffer (zero-copy) to the main thread
+      this.port.postMessage(int16.buffer, [int16.buffer]);
+    }
+
     return true; // returning false would stop the processor
   }
 }

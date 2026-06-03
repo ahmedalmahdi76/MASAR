@@ -1,13 +1,54 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAudioStream } from '../hooks/useAudioStream';
 import { useTTS } from '../hooks/useTTS';
 import { useTheme } from '../contexts/ThemeContext';
 import ThemeToggle from '../components/ThemeToggle';
+import { supabase } from '../supabase';
+import OnboardingTour from '../components/OnboardingTour';
+import DiagramPromptBubble from '../components/DiagramPromptBubble';
+import DiagramPanel from '../components/DiagramPanel';
+import { exportSessionPDF } from '../utils/generatePDF';
+
+const TOUR_STEPS_WORKSPACE = [
+  {
+    targetId:    'waveform-canvas',
+    title:       'موجة الصوت',
+    description: 'الموجة دي بتتحرك مع صوتك وصوت مسار. اللون البرتقالي لما بتتكلم، السماوي لما مسار بيرد.',
+    position:    'top',
+  },
+  {
+    targetId:    'start-call-btn',
+    title:       'ابدأ المكالمة',
+    description: 'اضغط هنا وابدأ تتكلم بالعامية المصرية — مسار هيسمعك ويرد عليك فوراً.',
+    position:    'top',
+  },
+  {
+    targetId:    'eye-toggle-btn',
+    title:       'عرض النص',
+    description: 'اضغط هنا عشان تشوف النص المكتوب لكلامك وإجابة مسار.',
+    position:    'bottom',
+  },
+  {
+    targetId:    'replay-btn',
+    title:       'إعادة الإجابة',
+    description: 'بعد ما مسار يجاوب، اضغط هنا عشان تسمع الإجابة تاني.',
+    position:    'top',
+  },
+  {
+    targetId:    'sidebar-btn',
+    title:       'الجلسات السابقة',
+    description: 'من هنا تقدر تشوف كل محادثاتك السابقة وترجع ليها.',
+    position:    'bottom',
+  },
+];
 
 const VAD_THRESHOLDS = { low: 0.20, medium: 0.10, high: 0.05 };
 const VAD_SILENCE_MS = 4000;
 const VAD_MIN_SPEECH = 600;
+
+const DIAGRAM_SERVICES = new Set(['topology','fiber','ip','redundancy','security','monitoring','capacity','qos']);
+const API_BASE = import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000';
 
 const DEFAULT_SERVICE = {
   id: 'fiber',
@@ -105,6 +146,49 @@ export default function Workspace() {
     try { return JSON.parse(localStorage.getItem('masar_sessions') || '[]'); } catch { return []; }
   });
 
+  // PDF export
+  const [pdfLoading,     setPdfLoading]     = useState(false);
+  const [sessionSearch,  setSessionSearch]  = useState('');
+  const handleExportPDF = async () => {
+    setPdfLoading(true);
+    try {
+      const filledTurns = displayTurns.filter(t => t.text);
+      await exportSessionPDF({
+        turns: filledTurns,
+        masarResponses,
+        solutions,
+        service,
+        techLevel,
+        startTime: startTimeRef.current,
+        duration: Math.floor((Date.now() - startTimeRef.current) / 1000),
+        diagrams,
+      });
+    } catch (error) {
+      console.error('PDF export failed:', error);
+      alert('حصل خطأ في تصدير الـ PDF، حاول تاني');
+    } finally {
+      setPdfLoading(false);
+    }
+  };
+
+  // Onboarding tour
+  const [showTour, setShowTour] = useState(false);
+  useEffect(() => {
+    const done = localStorage.getItem('masar_tour_workspace');
+    if (!done) setTimeout(() => setShowTour(true), 800);
+  }, []);
+  const completeTour = () => { localStorage.setItem('masar_tour_workspace', 'done'); setShowTour(false); };
+
+  // Supabase session persistence
+  const [currentUser,       setCurrentUser]       = useState(undefined);
+  const [supabaseSessionId, setSupabaseSessionId] = useState(null);
+  const [supabaseSessions,  setSupabaseSessions]  = useState([]);
+  const [isLoadedSession,   setIsLoadedSession]   = useState(false);
+  const [loadedTurns,       setLoadedTurns]       = useState([]);
+  const supabaseSessionIdRef = useRef(null); // mirrors state — safe to read inside effects
+  const sessionCreatingRef   = useRef(false); // prevents duplicate session creation race
+  const sessionStartTimeRef  = useRef(null);
+
   const startTimeRef = useRef(Date.now());
   const prevStateRef = useRef('idle');
 
@@ -119,6 +203,13 @@ export default function Workspace() {
   const [solvingIds,          setSolvingIds]          = useState({});
   const [conversationHistory, setConversationHistory] = useState([]);
   const historyAddedRef = useRef(new Set());
+
+  const [diagrams,            setDiagrams]            = useState({});
+  const [diagramLoading,      setDiagramLoading]      = useState({});
+  const [showDiagramPrompt,   setShowDiagramPrompt]   = useState(false);
+  const [pendingDiagramTurnId, setPendingDiagramTurnId] = useState(null);
+  const diagramTriggeredRef = useRef(new Set());
+  const promptedRef         = useRef(new Set());
 
   const {
     ttsStates, play: playTTS, stop: stopTTS,
@@ -188,9 +279,80 @@ export default function Workspace() {
           user:      masarResponses[t.id],
           assistant: solutions[t.id],
         }]);
+        // Persist to Supabase — lazy session creation on first real turn
+        (async () => {
+          const { data: { user } } = await supabase.auth.getUser();
+          if (!user) return;
+
+          if (!supabaseSessionIdRef.current) {
+            if (sessionCreatingRef.current) return;
+            sessionCreatingRef.current = true;
+            const { data: sessionData, error: sessionError } = await supabase
+              .from('sessions')
+              .insert({
+                user_id:    user.id,
+                service_id: service.id,
+                tech_level: techLevel,
+                started_at: new Date().toISOString(),
+              })
+              .select()
+              .single();
+            if (sessionError || !sessionData) return;
+            supabaseSessionIdRef.current = sessionData.id;
+            setSupabaseSessionId(sessionData.id);
+
+            // Generate Arabic title from first question
+            try {
+              const res = await fetch(
+                `${import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000'}/session-title`,
+                {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    first_question: masarResponses[t.id],
+                    service_id:     service.id,
+                  }),
+                }
+              );
+              const { title } = await res.json();
+              await supabase.from('sessions')
+                .update({ title })
+                .eq('id', supabaseSessionIdRef.current);
+            } catch (e) {
+              console.warn('[session-title] failed:', e.message);
+            }
+          }
+
+          const { error } = await supabase.from('turns').insert({
+            session_id:        supabaseSessionIdRef.current,
+            arabic_transcript: t.text,
+            refined_prompt:    masarResponses[t.id],
+            solution:          solutions[t.id],
+          });
+          if (error) console.warn('[Supabase] turn insert failed:', error.message);
+        })();
       }
     });
   }, [turns, masarResponses, streamingIds, solutions, solvingIds]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Diagram prompt — show bubble 1s after solution completes for technical services
+  useEffect(() => {
+    turns.forEach(t => {
+      if (
+        !t.isActive &&
+        solutions[t.id] && !solvingIds[t.id] &&
+        DIAGRAM_SERVICES.has(service.id) &&
+        !promptedRef.current.has(t.id) &&
+        !diagramTriggeredRef.current.has(t.id)
+      ) {
+        promptedRef.current.add(t.id);
+        setTimeout(() => {
+          setPendingDiagramTurnId(t.id);
+          setShowDiagramPrompt(true);
+        }, 1000);
+      }
+    });
+  }, [turns, solutions, solvingIds]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // VAD loop
   useEffect(() => {
@@ -231,6 +393,41 @@ export default function Workspace() {
   useEffect(() => {
     return; // barge-in disabled - mic conflict
   }, [callActive, masarState]);
+
+  // Unmount cleanup — release mic, TTS, and call state
+  useEffect(() => {
+    return () => {
+      stopRecording();
+      stopTTS();
+      setCallActive(false);
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Supabase session persistence ───────────────────────────────────────────
+  const fetchSessions = async () => {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+      const { data } = await supabase
+        .from('sessions')
+        .select('*, turns(*)')
+        .eq('user_id', user.id)
+        .order('started_at', { ascending: false });
+      setSupabaseSessions(data ?? []);
+    } catch (err) {
+      console.error('[fetchSessions] failed:', err);
+    }
+  };
+
+  useEffect(() => {
+    (async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      setCurrentUser(user ?? null);
+      if (user) fetchSessions();
+    })();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const isGuest = currentUser === null && !!localStorage.getItem('masar_guest');
 
   // ── Canvas refs ────────────────────────────────────────────────────────────
   const canvasRef        = useRef(null);
@@ -373,7 +570,13 @@ export default function Workspace() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Call controls ──────────────────────────────────────────────────────────
-  function startCall() { setCallActive(true); startRecording(); }
+  function startCall() {
+    sessionStartTimeRef.current = Date.now();
+    setCallActive(true);
+    setIsLoadedSession(false);
+    startRecording();
+  }
+
   function endCall() {
     const activeTtsTurn = turns.find(t => ttsStates[t.id] && ttsStates[t.id] !== 'idle');
     if (activeTtsTurn) stopTTS(activeTtsTurn.id);
@@ -381,12 +584,24 @@ export default function Workspace() {
     stopRecording();
   }
 
-  function endSession() {
+  async function _closeSupabaseSession() {
+    if (!supabaseSessionIdRef.current) return;
+    const duration = sessionStartTimeRef.current
+      ? Math.floor((Date.now() - sessionStartTimeRef.current) / 1000)
+      : 0;
+    await supabase.from('sessions').update({
+      ended_at: new Date().toISOString(),
+    }).eq('id', supabaseSessionIdRef.current);
+  }
+
+  async function endSession() {
     endCall();
+    await _closeSupabaseSession();
+    // Guest / localStorage fallback
     if (turns.some(t => t.text)) {
       const firstText = turns.find(t => t.text)?.text ?? '';
       const label = firstText.length > 42 ? firstText.slice(0, 42) + '…' : firstText;
-      const newSession = {
+      const newSess = {
         id: startTimeRef.current,
         label: label || service.label,
         service: service.label,
@@ -396,17 +611,20 @@ export default function Workspace() {
         durationSecs: Math.round((Date.now() - startTimeRef.current) / 1000),
         time: new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }),
       };
-      const updated = [newSession, ...sessions].slice(0, 20);
+      const updated = [newSess, ...sessions].slice(0, 20);
       setSessions(updated);
       localStorage.setItem('masar_sessions', JSON.stringify(updated));
     }
+    await fetchSessions();
     navigate('/summary', {
       state: { turns, masarResponses, solutions, service, techLevel, startTime: startTimeRef.current },
     });
   }
 
-  function newSession() {
+  async function newSession() {
     endCall();
+    await _closeSupabaseSession();
+    // Guest / localStorage fallback
     if (turns.some(t => t.text)) {
       const firstText = turns.find(t => t.text)?.text ?? '';
       const label = firstText.length > 42 ? firstText.slice(0, 42) + '…' : firstText;
@@ -431,12 +649,87 @@ export default function Workspace() {
     setSolvingIds({});
     setConversationHistory([]);
     setHasLastSpoken(false);
+    setSupabaseSessionId(null);
+    setIsLoadedSession(false);
+    setLoadedTurns([]);
+    supabaseSessionIdRef.current = null;
+    sessionCreatingRef.current   = false;
+    sessionStartTimeRef.current  = null;
     ttsTriggeredRef.current   = new Set();
     historyAddedRef.current   = new Set();
     lastSpokenRef.current     = null;
     lastSpokenTurnRef.current = null;
     startTimeRef.current = Date.now();
+    setDiagrams({});
+    setDiagramLoading({});
+    setShowDiagramPrompt(false);
+    setPendingDiagramTurnId(null);
+    diagramTriggeredRef.current = new Set();
+    promptedRef.current         = new Set();
+    await fetchSessions();
   }
+
+  function loadSession(s) {
+    setSidebarOpen(false);
+    // Map Supabase turns → Workspace turn shape
+    const mapped = (s.turns ?? []).map(t => ({
+      id:       t.id,
+      text:     t.arabic_transcript ?? '',
+      partial:  '',
+      time:     new Date(t.created_at).toLocaleTimeString('en-GB', {
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+      }),
+      isActive: false,
+    }));
+    // Pre-populate responses + solutions so display works immediately
+    const responses = {};
+    const sols      = {};
+    const history   = [];
+    (s.turns ?? []).forEach(t => {
+      responses[t.id] = t.refined_prompt ?? '';
+      sols[t.id]      = t.solution       ?? '';
+      history.push({ user: t.refined_prompt, assistant: t.solution });
+      historyAddedRef.current.add(t.id);   // prevent history effect re-processing
+      ttsTriggeredRef.current.add(t.id);   // prevent auto-TTS on loaded turns
+    });
+    clearTurns();
+    setLoadedTurns(mapped);
+    setMasarResponses(responses);
+    setSolutions(sols);
+    setConversationHistory(history);
+    setIsLoadedSession(true);
+    setShowText(true);
+  }
+
+  async function deleteSession(sessionId) {
+    if (!window.confirm('هتمسح الجلسة دي؟')) return;
+    await supabase.from('turns').delete().eq('session_id', sessionId);
+    await supabase.from('sessions').delete().eq('id', sessionId);
+    await fetchSessions();
+  }
+
+  // Merge loaded past turns with live mic turns for display
+  const displayTurns = [...loadedTurns, ...turns];
+
+  // Latest Claude solution for the text panel (most recent turn with any solution)
+  const latestSolvedTurn = (() => {
+    const withSol = displayTurns.filter(t => solutions[t.id]);
+    return withSol.length > 0 ? withSol[withSol.length - 1] : null;
+  })();
+  const latestSolution = latestSolvedTurn ? solutions[latestSolvedTurn.id] : null;
+  console.log('[DIAGRAM] latestSolvedTurn check:',
+    'displayTurns:', displayTurns.length,
+    'withSolutions:', displayTurns.filter(t => solutions[t.id]).length,
+    'result:', latestSolvedTurn?.id
+  );
+  console.log('[DIAGRAM] showText:', showText, 'latestSolvedTurn:', latestSolvedTurn?.id, 'diagrams:', Object.keys(diagrams));
+
+  const latestTurn = displayTurns.length > 0 ? displayTurns[displayTurns.length - 1] : null;
+  const latestTranscript = latestTurn
+    ? (latestTurn.isActive
+        ? [latestTurn.text, latestTurn.partial].filter(Boolean).join(' ') || null
+        : latestTurn.text || null)
+    : null;
 
   const callBusy   = callActive && masarState === 'thinking';
   const showReplay = hasLastSpoken && masarState === 'idle';
@@ -447,24 +740,51 @@ export default function Workspace() {
     }
   };
 
-  // Latest Claude solution for the text panel (most recent turn with any solution)
-  const latestSolution = (() => {
-    const withSol = turns.filter(t => solutions[t.id]);
-    return withSol.length > 0 ? solutions[withSol[withSol.length - 1].id] : null;
-  })();
+  const fetchDiagram = async (turnId) => {
+    console.log('[DIAGRAM] fetchDiagram called for turnId:', turnId);
+    console.log('[DIAGRAM] solution text length:', solutions[turnId]?.length);
+    console.log('[DIAGRAM] already triggered:', diagramTriggeredRef.current.has(turnId));
+    if (diagramTriggeredRef.current.has(turnId)) return;
+    diagramTriggeredRef.current.add(turnId);
+    setDiagramLoading(prev => ({ ...prev, [turnId]: true }));
+    setShowDiagramPrompt(false);
+    try {
+      const res = await fetch(`${API_BASE}/diagram`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ solution: solutions[turnId], service_id: service.id }),
+      });
+      console.log('[DIAGRAM] response status:', res.status);
+      const data = await res.json();
+      console.log('[DIAGRAM] response data:', data);
+      const { diagram } = data;
+      if (diagram) setDiagrams(prev => ({ ...prev, [turnId]: diagram }));
+    } catch (e) {
+      console.error('Diagram fetch failed:', e);
+    } finally {
+      setDiagramLoading(prev => { const n = { ...prev }; delete n[turnId]; return n; });
+    }
+  };
 
-  const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
-  const latestTranscript = latestTurn
-    ? (latestTurn.isActive
-        ? [latestTurn.text, latestTurn.partial].filter(Boolean).join(' ') || null
-        : latestTurn.text || null)
-    : null;
+  const handleDiagramAccept = useCallback(() => {
+    console.log('[DIAGRAM] accept clicked, pendingDiagramTurnId:', pendingDiagramTurnId);
+    if (pendingDiagramTurnId) {
+      setShowText(true);
+      fetchDiagram(pendingDiagramTurnId);
+    }
+  }, [pendingDiagramTurnId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleDiagramDismiss = useCallback(() => {
+    setShowDiagramPrompt(false);
+    if (pendingDiagramTurnId) diagramTriggeredRef.current.add(pendingDiagramTurnId);
+  }, [pendingDiagramTurnId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div style={{ height: '100vh', width: '100vw', position: 'relative', overflow: 'hidden', background: theme === 'light' ? '#F0F4F8' : '#010508' }}>
 
       {/* ── Full-screen canvas ── */}
       <canvas
+        id="waveform-canvas"
         ref={canvasRef}
         style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
       />
@@ -498,6 +818,18 @@ export default function Workspace() {
         transition: 'opacity 300ms ease',
         pointerEvents: (showText && (latestTranscript || latestSolution)) ? 'auto' : 'none',
       }}>
+
+        {/* Loaded-session banner */}
+        {isLoadedSession && !callActive && (
+          <p style={{
+            fontFamily: 'Cairo, sans-serif', fontSize: '0.8125rem',
+            direction: 'rtl', textAlign: 'right',
+            color: 'var(--masar-amber)', margin: '0 0 1.25rem 0',
+            opacity: 0.85,
+          }}>
+            جلسة محفوظة — اضغط ابدأ مكالمة للاستمرار
+          </p>
+        )}
 
         {/* قلت — user speech */}
         {latestTranscript && (
@@ -547,6 +879,14 @@ export default function Workspace() {
           </div>
         )}
 
+        {/* Network diagram panel — shown after user accepts the prompt */}
+        {(diagrams[latestSolvedTurn?.id] || diagramLoading[latestSolvedTurn?.id]) && (
+          <DiagramPanel
+            diagramCode={diagrams[latestSolvedTurn?.id]}
+            loading={!!diagramLoading[latestSolvedTurn?.id]}
+          />
+        )}
+
       </div>
 
       {/* ── Sidebar scrim ── */}
@@ -592,34 +932,116 @@ export default function Workspace() {
           </div>
 
           <div style={{ padding: '0 0.75rem 0.75rem' }}>
-            <input placeholder="Search sessions..." style={{
-              width: '100%', background: 'var(--masar-elevated)',
-              border: '1px solid var(--masar-border)', borderRadius: 'var(--radius-md)',
-              color: '#E2E8F0', fontFamily: 'var(--font-mono)',
-              fontSize: '0.8125rem', padding: '0.5rem 0.75rem', outline: 'none',
-              boxSizing: 'border-box',
-            }} />
+            <input
+              placeholder="Search sessions..."
+              value={sessionSearch}
+              onChange={e => setSessionSearch(e.target.value)}
+              style={{
+                width: '100%', background: 'var(--masar-elevated)',
+                border: '1px solid var(--masar-border)', borderRadius: 'var(--radius-md)',
+                color: '#E2E8F0', fontFamily: 'var(--font-mono)',
+                fontSize: '0.8125rem', padding: '0.5rem 0.75rem', outline: 'none',
+                boxSizing: 'border-box',
+              }}
+            />
           </div>
 
           <div style={{ flex: 1, overflowY: 'auto', padding: '0 0.75rem' }}>
             <p className="mono-sm" style={{ color: 'var(--masar-muted)', padding: '0.5rem 0.25rem' }}>
               Previous Sessions
             </p>
-            {sessions.length === 0 ? (
-              <p className="mono-sm" style={{ color: 'var(--masar-muted)', padding: '0.25rem' }}>No sessions yet</p>
-            ) : sessions.map(s => (
-              <div key={s.id} style={{
-                padding: '0.625rem 0.75rem', borderRadius: 'var(--radius-md)',
-                cursor: 'pointer', marginBottom: '0.125rem',
-                borderLeft: `2px solid ${s.accent ?? 'var(--masar-border)'}`,
-              }}
-                onMouseEnter={e => e.currentTarget.style.background = 'var(--masar-elevated)'}
-                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-              >
-                <p style={{ fontSize: '0.8125rem', color: '#CBD5E1', marginBottom: '0.125rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.label}</p>
-                <p className="mono-sm" style={{ color: 'var(--masar-muted)' }}>{s.service} · {s.time}</p>
-              </div>
-            ))}
+
+            {/* ── Logged-in: Supabase sessions only ── */}
+            {currentUser
+              ? (() => {
+                  const filteredSessions = supabaseSessions.filter(s =>
+                    !sessionSearch ||
+                    (s.title ?? '').includes(sessionSearch) ||
+                    (s.service_id ?? '').includes(sessionSearch)
+                  );
+                  return filteredSessions.length > 0
+                    ? filteredSessions.map(s => (
+                  <div key={s.id} style={{
+                    display: 'flex', alignItems: 'flex-start', gap: '0.5rem',
+                    padding: '0.625rem 0.75rem', borderRadius: 'var(--radius-md)',
+                    cursor: 'pointer', marginBottom: '0.125rem',
+                    borderLeft: '2px solid var(--masar-amber)',
+                  }}
+                    onClick={() => loadSession(s)}
+                    onMouseEnter={e => e.currentTarget.style.background = 'var(--masar-elevated)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                  >
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <p style={{ fontSize: '0.8125rem', color: '#CBD5E1', marginBottom: '0.125rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontFamily: 'Cairo, sans-serif', direction: 'rtl' }}>
+                        {s.title ?? s.service_id ?? 'جلسة'}
+                      </p>
+                      <p className="mono-sm" style={{ color: 'var(--masar-muted)', fontFamily: 'Cairo, sans-serif', direction: 'rtl', textAlign: 'right' }}>
+                        {new Date(s.started_at).toLocaleDateString('ar-EG')}
+                        {s.duration_seconds ? ` · ${Math.round(s.duration_seconds / 60)} د` : ''}
+                        {s.turns?.length ? ` · ${s.turns.length} رد` : ''}
+                      </p>
+                    </div>
+                    <button
+                      onClick={e => { e.stopPropagation(); deleteSession(s.id); }}
+                      style={{
+                        background: 'transparent', border: 'none',
+                        color: 'rgba(239,68,68,0.5)', cursor: 'pointer',
+                        fontSize: '0.875rem', lineHeight: 1, padding: '0.125rem',
+                        flexShrink: 0, transition: 'color 150ms',
+                      }}
+                      onMouseEnter={e => e.currentTarget.style.color = '#EF4444'}
+                      onMouseLeave={e => e.currentTarget.style.color = 'rgba(239,68,68,0.5)'}
+                      title="حذف الجلسة"
+                    >×</button>
+                  </div>
+                ))
+                : (
+                  <p style={{
+                    fontFamily: 'Cairo, sans-serif', fontSize: '0.8125rem',
+                    color: 'var(--masar-muted)', textAlign: 'center', direction: 'rtl',
+                    padding: '1rem 0.25rem',
+                  }}>
+                    مفيش جلسات محفوظة لسه
+                  </p>
+                );
+                })()
+              : /* Guest — localStorage sessions only */
+                sessions.length > 0
+                  ? sessions.map(s => (
+                    <div key={s.id} style={{
+                      padding: '0.625rem 0.75rem', borderRadius: 'var(--radius-md)',
+                      cursor: 'pointer', marginBottom: '0.125rem',
+                      borderLeft: `2px solid ${s.accent ?? 'var(--masar-border)'}`,
+                    }}
+                      onMouseEnter={e => e.currentTarget.style.background = 'var(--masar-elevated)'}
+                      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                    >
+                      <p style={{ fontSize: '0.8125rem', color: '#CBD5E1', marginBottom: '0.125rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.label}</p>
+                      <p className="mono-sm" style={{ color: 'var(--masar-muted)' }}>{s.service} · {s.time}</p>
+                    </div>
+                  ))
+                  : (
+                    <p className="mono-sm" style={{ color: 'var(--masar-muted)', padding: '0.25rem' }}>No sessions yet</p>
+                  )
+            }
+
+            {/* Guest login prompt */}
+            {isGuest && (
+              <p style={{
+                fontFamily: 'Cairo, sans-serif', fontSize: '0.75rem',
+                color: 'var(--masar-muted)', textAlign: 'right', direction: 'rtl',
+                padding: '0.75rem 0.25rem 0.25rem', marginTop: '0.5rem',
+                borderTop: '1px solid var(--masar-border)',
+              }}>
+                <span
+                  onClick={() => navigate('/auth')}
+                  style={{ color: 'var(--masar-amber)', cursor: 'pointer', textDecoration: 'underline' }}
+                >
+                  سجل دخول
+                </span>
+                {' '}عشان تحفظ جلساتك
+              </p>
+            )}
           </div>
 
           <div style={{ padding: '0.75rem', borderTop: '1px solid var(--masar-border)' }}>
@@ -637,6 +1059,7 @@ export default function Workspace() {
         background: 'linear-gradient(to bottom, rgba(1,5,8,0.70) 0%, transparent 100%)',
       }}>
         <button
+          id="sidebar-btn"
           onClick={() => setSidebarOpen(v => !v)}
           style={{
             background: 'transparent', border: 'none',
@@ -657,13 +1080,23 @@ export default function Workspace() {
         </span>
 
         <div style={{ display: 'flex', gap: '0.5rem' }}>
-          <TopBarBtn
-            onClick={() => setShowText(v => !v)}
-            active={showText}
-            title={showText ? 'Hide response' : 'Show response'}
-          >
-            👁
-          </TopBarBtn>
+          <span id="eye-toggle-btn">
+            <TopBarBtn
+              onClick={() => setShowText(v => !v)}
+              active={showText}
+              title={showText ? 'Hide response' : 'Show response'}
+            >
+              👁
+            </TopBarBtn>
+          </span>
+          {Object.keys(solutions).length > 0 && (
+            <TopBarBtn
+              onClick={handleExportPDF}
+              title={pdfLoading ? 'Generating PDF…' : 'Export PDF'}
+            >
+              {pdfLoading ? '…' : '📄'}
+            </TopBarBtn>
+          )}
           <ThemeToggle />
           <TopBarBtn onClick={() => navigate('/settings')} title="Settings">
             ⚙
@@ -684,6 +1117,7 @@ export default function Workspace() {
 
           {/* Replay button — left of mic, fades in when MASAR returns to idle */}
           <button
+            id="replay-btn"
             onClick={handleReplay}
             title="Replay last response"
             style={{
@@ -706,6 +1140,7 @@ export default function Workspace() {
 
           {/* Mic / End Call button */}
           <button
+            id="start-call-btn"
             onClick={callActive ? endCall : startCall}
             disabled={callBusy}
             style={{
@@ -762,6 +1197,21 @@ export default function Workspace() {
 
       </div>
 
+      {showTour && (
+        <OnboardingTour
+          steps={TOUR_STEPS_WORKSPACE}
+          onComplete={completeTour}
+          onSkip={completeTour}
+        />
+      )}
+
+      <DiagramPromptBubble
+        key={pendingDiagramTurnId}
+        visible={showDiagramPrompt}
+        onAccept={handleDiagramAccept}
+        onDismiss={handleDiagramDismiss}
+      />
+
     </div>
   );
 }
@@ -777,6 +1227,11 @@ async function streamRefine(turnId, text, techLevel, serviceId, setMasarResponse
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text, tech_level: techLevel, service_id: serviceId }),
     });
+    if (!res.ok) {
+      setMasarResponses(prev => ({ ...prev, [turnId]: 'حصل خطأ في المعالجة، حاول تاني' }));
+      setStreamingIds(prev => { const n = { ...prev }; delete n[turnId]; return n; });
+      return;
+    }
     const reader  = res.body.getReader();
     const decoder = new TextDecoder();
     while (true) {
@@ -817,6 +1272,11 @@ async function streamSolve(turnId, refinedPrompt, techLevel, serviceId, setSolut
         history,
       }),
     });
+    if (!res.ok) {
+      setSolutions(prev => ({ ...prev, [turnId]: 'حصل خطأ في التوليد، حاول تاني' }));
+      setSolvingIds(prev => { const n = { ...prev }; delete n[turnId]; return n; });
+      return;
+    }
     const reader  = res.body.getReader();
     const decoder = new TextDecoder();
     while (true) {

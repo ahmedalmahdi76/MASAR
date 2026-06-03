@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
+import { exportSessionPDF } from '../utils/generatePDF';
 
 /*
  * STAGE 5 — Session Summary
@@ -38,6 +40,20 @@ export default function SessionSummary() {
 
   // Only turns that have actual text
   const filledTurns = turns.filter(t => t.text);
+  const duration    = startTime ? Math.floor((Date.now() - startTime) / 1000) : null;
+  const [pdfLoading, setPdfLoading] = useState(false);
+
+  const handleExportPDF = async () => {
+    setPdfLoading(true);
+    try {
+      await exportSessionPDF({ turns: filledTurns, masarResponses, solutions, service, techLevel, startTime, duration });
+    } catch (error) {
+      console.error('PDF export failed:', error);
+      alert('حصل خطأ في تصدير الـ PDF، حاول تاني');
+    } finally {
+      setPdfLoading(false);
+    }
+  };
 
   return (
     <div style={{ minHeight: '100vh', position: 'relative', padding: '0 2rem 4rem' }}>
@@ -179,6 +195,28 @@ export default function SessionSummary() {
             }}
           >
             Copy to Clipboard
+          </button>
+
+          <button
+            onClick={handleExportPDF}
+            disabled={pdfLoading || filledTurns.length === 0}
+            style={{
+              background: pdfLoading ? 'rgba(245,158,11,0.06)' : 'rgba(245,158,11,0.10)',
+              border: '1px solid rgba(245,158,11,0.45)',
+              color: 'var(--masar-amber)',
+              fontFamily: 'Cairo, sans-serif',
+              fontSize: '0.9rem',
+              padding: '0.625rem 1.25rem',
+              borderRadius: 'var(--radius-md)',
+              cursor: pdfLoading || filledTurns.length === 0 ? 'not-allowed' : 'pointer',
+              opacity: filledTurns.length === 0 ? 0.45 : 1,
+              display: 'flex', alignItems: 'center', gap: '0.4rem',
+              transition: 'background 200ms',
+            }}
+            onMouseEnter={e => { if (!pdfLoading) e.currentTarget.style.background = 'rgba(245,158,11,0.18)'; }}
+            onMouseLeave={e => { e.currentTarget.style.background = pdfLoading ? 'rgba(245,158,11,0.06)' : 'rgba(245,158,11,0.10)'; }}
+          >
+            {pdfLoading ? 'جاري التصدير...' : '📄 تصدير PDF'}
           </button>
         </div>
       </div>

@@ -5,6 +5,7 @@ import { ThemeProvider } from './contexts/ThemeContext';
 import Spinner from './components/Spinner';
 import LandingPage    from './pages/LandingPage';
 import AuthPage       from './pages/AuthPage';
+import ResetPassword  from './pages/ResetPassword';
 import ServiceSelect  from './pages/ServiceSelect';
 import Workspace      from './pages/Workspace';
 import SessionSummary from './pages/SessionSummary';
@@ -16,10 +17,16 @@ function ProtectedRoute({ children }) {
 
   useEffect(() => {
     const check = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      const isGuest = localStorage.getItem('masar_guest');
-      setAllowed(!!session || !!isGuest);
-      setChecking(false);
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        const isGuest = localStorage.getItem('masar_guest');
+        setAllowed(!!session || !!isGuest);
+      } catch (err) {
+        console.error('[ProtectedRoute] Auth check failed:', err);
+        setAllowed(!!localStorage.getItem('masar_guest'));
+      } finally {
+        setChecking(false);
+      }
     };
     check();
 
@@ -58,7 +65,8 @@ export default function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/"     element={<LandingPage />} />
-          <Route path="/auth" element={<AuthPage />} />
+          <Route path="/auth"          element={<AuthPage />} />
+          <Route path="/reset-password" element={<ResetPassword />} />
 
           <Route path="/services"  element={<ProtectedRoute><ServiceSelect /></ProtectedRoute>} />
           <Route path="/workspace" element={<ProtectedRoute><Workspace /></ProtectedRoute>} />

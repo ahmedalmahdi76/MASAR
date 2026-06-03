@@ -183,6 +183,7 @@ export function useTTS() {
   async function _playBlob(turnId, text) {
     const controller = new AbortController();
     abortRef.current = controller;
+    let url = null;
 
     try {
       const res = await fetch(TTS_URL, {
@@ -201,7 +202,7 @@ export function useTTS() {
       }
 
       const blob  = await res.blob();
-      const url   = URL.createObjectURL(blob);
+      url = URL.createObjectURL(blob);
       const audio = new Audio();
       audio.src = url;
       audio.load();
@@ -225,7 +226,7 @@ export function useTTS() {
       _setTts(turnId, 'playing');
       await audio.play();
     } catch (err) {
-      if (err.name === 'AbortError') return;
+      if (err.name === 'AbortError') { if (url) URL.revokeObjectURL(url); return; }
       console.error('[useTTS] Blob fallback error:', err);
       _setTts(turnId, 'idle');
       activeRef.current = null;
@@ -233,6 +234,7 @@ export function useTTS() {
   }
 
   function stop(id) {
+    if (id === undefined) { _stopCurrent(); return; }
     if (activeRef.current === id) _stopCurrent();
   }
 
