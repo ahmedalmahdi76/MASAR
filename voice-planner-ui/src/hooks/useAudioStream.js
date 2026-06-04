@@ -52,33 +52,76 @@ export function useAudioStream() {
     setTurns(prev => [...prev, { id: turnId, text: '', partial: '', time: '', isActive: true }]);
     activeTurnIdRef.current = turnId;
 
-    try {
-      await new Promise(resolve => setTimeout(resolve, 200));
-      let stream;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          await new Promise(r => setTimeout(r, 200 * attempt));
-          stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-          break;
-        } catch (e) {
-          if (e.name === 'NotReadableError' && attempt < 2) {
-            console.warn('[mic] NotReadableError attempt', attempt + 1, '— retrying...');
-            continue;
-          }
-          throw e;
-        }
-      }
-      streamRef.current = stream;
+    // Detect whether the monitoring pipeline (AudioContext + stream + analyser + rAF)
+    // is already alive from the previous turn. If so, reuse it — don't open a second
+    // getUserMedia or create a second AudioContext, which would cause NotReadableError.
+    const pipelineAlive = audioCtxRef.current && audioCtxRef.current.state !== 'closed';
 
-      const audioCtx = new AudioContext();
-      audioCtxRef.current = audioCtx;
-      const stateChangeHandler = () => {
-        if (audioCtx.state === 'suspended' && analyserRef.current) {
-          audioCtx.resume().catch(() => {});
+    try {
+      if (!pipelineAlive) {
+        // ── Cold start: build the full monitoring pipeline ──────────────
+        await new Promise(resolve => setTimeout(resolve, 200));
+        let stream;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            await new Promise(r => setTimeout(r, 200 * attempt));
+            stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+            break;
+          } catch (e) {
+            if (e.name === 'NotReadableError' && attempt < 2) {
+              console.warn('[mic] NotReadableError attempt', attempt + 1, '— retrying...');
+              continue;
+            }
+            throw e;
+          }
         }
-      };
-      stateChangeHandlerRef.current = stateChangeHandler;
-      audioCtx.addEventListener('statechange', stateChangeHandler);
+        streamRef.current = stream;
+
+        const audioCtx = new AudioContext();
+        audioCtxRef.current = audioCtx;
+        const stateChangeHandler = () => {
+          if (audioCtx.state === 'suspended' && analyserRef.current) {
+            audioCtx.resume().catch(() => {});
+          }
+        };
+        stateChangeHandlerRef.current = stateChangeHandler;
+        audioCtx.addEventListener('statechange', stateChangeHandler);
+
+        // ── Voice Activity Detection ──────────────────────────────────────
+        // AnalyserNode is placed IN-SERIES (source → analyser → worklet → destination)
+        // so Chrome's audio graph optimizer keeps it active. A dead-end analyser
+        // branch gets skipped and always returns zero.
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 2048;
+        analyser.smoothingTimeConstant = VAD_SMOOTHING;
+        analyserRef.current = analyser;
+        const timeDomainBuffer = new Uint8Array(analyser.fftSize);
+
+        const detectVoice = () => {
+          if (!analyserRef.current) return;
+          analyserRef.current.getByteTimeDomainData(timeDomainBuffer);
+          let sumSq = 0;
+          for (let i = 0; i < timeDomainBuffer.length; i++) {
+            const s = (timeDomainBuffer[i] - 128) / 128;
+            sumSq += s * s;
+          }
+          const rms = Math.sqrt(sumSq / timeDomainBuffer.length);
+          audioLevelRef.current = Math.min(1, rms / LEVEL_MAX);
+          setIsSpeaking(rms > VAD_THRESHOLD);
+          rafRef.current = requestAnimationFrame(detectVoice);
+        };
+        rafRef.current = requestAnimationFrame(detectVoice);
+
+        if (audioCtx.state === 'suspended') {
+          await audioCtx.resume();
+        }
+      } else {
+        console.log('[useAudioStream] reusing monitoring pipeline for new turn');
+      }
+
+      // ── Per-turn: WebSocket + worklet (always fresh each turn) ──────────
+      const audioCtx   = audioCtxRef.current;
+      const analyser   = analyserRef.current;
       const sampleRate = audioCtx.sampleRate;
 
       const ws = new WebSocket(`${BACKEND_WS}?sample_rate=${sampleRate}`);
@@ -119,44 +162,15 @@ export function useAudioStream() {
         if (ws.readyState === WebSocket.OPEN) ws.send(e.data);
       };
 
-      // ── Voice Activity Detection ──────────────────────────────────────
-      // AnalyserNode is placed IN-SERIES (source → analyser → worklet → destination)
-      // so Chrome's audio graph optimizer keeps it active. A dead-end analyser
-      // branch gets skipped and always returns zero.
-      const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 2048;
-      analyser.smoothingTimeConstant = VAD_SMOOTHING;
-      analyserRef.current = analyser;
-      const timeDomainBuffer = new Uint8Array(analyser.fftSize);
-
-      const detectVoice = () => {
-        if (!analyserRef.current) return;
-        analyserRef.current.getByteTimeDomainData(timeDomainBuffer);
-        let sumSq = 0;
-        for (let i = 0; i < timeDomainBuffer.length; i++) {
-          const s = (timeDomainBuffer[i] - 128) / 128; // normalise to -1..1
-          sumSq += s * s;
-        }
-        const rms = Math.sqrt(sumSq / timeDomainBuffer.length);
-        audioLevelRef.current = Math.min(1, rms / LEVEL_MAX);
-        setIsSpeaking(rms > VAD_THRESHOLD);
-        rafRef.current = requestAnimationFrame(detectVoice);
-      };
-      rafRef.current = requestAnimationFrame(detectVoice);
-
       // Correct order: source → analyser (in-path) → workletNode → silentGain → destination
       // GainNode at 0 gives Chrome a real output path (prevents auto-suspend) with no audible echo
-      const source = audioCtx.createMediaStreamSource(stream);
+      const source = audioCtx.createMediaStreamSource(streamRef.current);
       const silentGain = audioCtx.createGain();
       silentGain.gain.value = 0.001;
       source.connect(analyser);
       analyser.connect(workletNode);
       workletNode.connect(silentGain);
       silentGain.connect(audioCtx.destination);
-
-      if (audioCtx.state === 'suspended') {
-        await audioCtx.resume();
-      }
 
       setIsRecording(true);
     } catch (err) {
@@ -166,22 +180,18 @@ export function useAudioStream() {
       activeTurnIdRef.current = null;
       wsRef.current?.close();
       wsRef.current = null;
-      streamRef.current?.getTracks().forEach(t => t.stop());
-      if (audioCtxRef.current?.state !== 'closed') audioCtxRef.current?.close();
-      audioCtxRef.current = null;
+      if (!pipelineAlive) {
+        streamRef.current?.getTracks().forEach(t => t.stop());
+        if (audioCtxRef.current?.state !== 'closed') audioCtxRef.current?.close();
+        audioCtxRef.current = null;
+      }
     }
-  }, []);
+  }, [isRecording]);
 
-  const stopRecording = useCallback(async () => {
-    // Stop VAD loop and reset level
-    if (rafRef.current) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
-    }
-    analyserRef.current   = null;
-    audioLevelRef.current = 0;
-    setIsSpeaking(false);
-
+  // Layer 1 — stop sending PCM / close WS / close worklet for this turn.
+  // Leaves AudioContext, stream, analyser, and rAF loop alive so audioLevelRef
+  // keeps updating during TTS (barge-in reads it).
+  const stopSending = useCallback(() => {
     const tid = activeTurnIdRef.current;
     if (tid) {
       const time = new Date().toLocaleTimeString('en-GB', {
@@ -196,23 +206,41 @@ export function useAudioStream() {
 
     workletRef.current?.disconnect();
     workletRef.current?.port.close();
-    if (stateChangeHandlerRef.current) {
-      audioCtxRef.current?.removeEventListener('statechange', stateChangeHandlerRef.current);
-      stateChangeHandlerRef.current = null;
-    }
-    await audioCtxRef.current?.close();
-    streamRef.current?.getTracks().forEach(t => t.stop());
-    audioCtxRef.current = null;
-    streamRef.current   = null;
+    workletRef.current = null;
     wsRef.current?.close();
-    workletRef.current  = null;
-    wsRef.current       = null;
+    wsRef.current = null;
 
     setIsRecording(false);
   }, []);
 
+  // Layer 2 — tear down the full monitoring pipeline (AudioContext + stream + analyser + rAF).
+  // Call this when the call fully ends (callActive → false), not between turns.
+  const stopMonitoring = useCallback(() => {
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    analyserRef.current   = null;
+    audioLevelRef.current = 0;
+    setIsSpeaking(false);
+
+    if (stateChangeHandlerRef.current) {
+      audioCtxRef.current?.removeEventListener('statechange', stateChangeHandlerRef.current);
+      stateChangeHandlerRef.current = null;
+    }
+    audioCtxRef.current?.close().catch(() => {});
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    audioCtxRef.current = null;
+    streamRef.current   = null;
+  }, []);
+
+  // stopRecording = Layer 1 only. Monitoring stays alive between turns for barge-in.
+  const stopRecording = useCallback(() => {
+    stopSending();
+  }, [stopSending]);
+
   const clearTurns = useCallback(() => setTurns([]), []);
   const removeTurn = useCallback((id) => setTurns(prev => prev.filter(t => t.id !== id)), []);
 
-  return { turns, isRecording, isSpeaking, audioLevelRef, error, startRecording, stopRecording, clearTurns, removeTurn };
+  return { turns, isRecording, isSpeaking, audioLevelRef, error, startRecording, stopRecording, stopMonitoring, clearTurns, removeTurn };
 }

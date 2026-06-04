@@ -63,6 +63,7 @@ const STATE_COLORS = {
   idle:      { w1: [245, 158,  11, 0.12], w2: [124,  58, 237, 0.08] },
   listening: { w1: [245, 158,  11, 1.00], w2: [124,  58, 237, 0.85] },
   thinking:  { w1: [ 34, 211, 238, 1.00], w2: [124,  58, 237, 0.85] },
+  preparing: { w1: [ 34, 211, 238, 1.00], w2: [124,  58, 237, 0.85] },
   speaking:  { w1: [ 34, 211, 238, 1.00], w2: [ 59, 130, 246, 0.85] },
 };
 
@@ -194,7 +195,7 @@ export default function Workspace() {
 
   const {
     turns, isRecording, audioLevelRef, error,
-    startRecording, stopRecording, clearTurns, removeTurn,
+    startRecording, stopRecording, stopMonitoring, clearTurns, removeTurn,
   } = useAudioStream();
 
   const [masarResponses,      setMasarResponses]      = useState({});
@@ -208,8 +209,9 @@ export default function Workspace() {
   const [diagramLoading,      setDiagramLoading]      = useState({});
   const [showDiagramPrompt,   setShowDiagramPrompt]   = useState(false);
   const [pendingDiagramTurnId, setPendingDiagramTurnId] = useState(null);
-  const diagramTriggeredRef = useRef(new Set());
-  const promptedRef         = useRef(new Set());
+  const diagramTriggeredRef  = useRef(new Set());
+  const promptedRef          = useRef(new Set());
+  const pendingRefinementRef = useRef(false);
 
   const {
     ttsStates, play: playTTS, stop: stopTTS,
@@ -221,6 +223,12 @@ export default function Workspace() {
   const lastSpokenRef     = useRef(null);   // text of last solution spoken
   const lastSpokenTurnRef = useRef(null);   // turn ID of last solution spoken
   const [hasLastSpoken, setHasLastSpoken] = useState(false);
+
+  // ── Sentence-streaming TTS queue ───────────────────────────────────────────
+  const [sentenceSpeaking, setSentenceSpeaking] = useState(false);
+  const sentenceQueueRef  = useRef([]);   // Promise<string>[] — blob URL promises in order
+  const sentenceAudioRef  = useRef(null); // currently playing Audio element
+  const queueDrainingRef  = useRef(false);
 
   useEffect(() => {
     turns.forEach(t => {
@@ -235,10 +243,12 @@ export default function Workspace() {
   }, [turns, solutions, solvingIds]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── masarState ─────────────────────────────────────────────────────────────
-  const isThinking = Object.keys(streamingIds).length > 0 || Object.keys(solvingIds).length > 0;
-  const masarState = masarSpeaking ? 'speaking'
-    : isRecording                  ? 'listening'
-    : isThinking                   ? 'thinking'
+  const isThinking    = Object.keys(streamingIds).length > 0 || Object.keys(solvingIds).length > 0;
+  const ttsLoadingAny = Object.values(ttsStates).some(s => s === 'loading');
+  const masarState = (masarSpeaking || sentenceSpeaking)           ? 'speaking'
+    : (isThinking || pendingRefinementRef.current)                 ? 'thinking'
+    : isRecording                                                  ? 'listening'
+    : ttsLoadingAny                                                ? 'preparing'
     : 'idle';
 
   // Error guard
@@ -252,15 +262,40 @@ export default function Workspace() {
     toRefine.forEach(turn => {
       const wordCount = turn.text.trim().split(/\s+/).filter(Boolean).length;
       if (wordCount < 5) { removeTurn(turn.id); return; }
-      streamRefine(turn.id, turn.text, techLevel, service.id, setMasarResponses, setStreamingIds);
+      pendingRefinementRef.current = true;
+      streamRefine(turn.id, turn.text, techLevel, service.id, setMasarResponses, setStreamingIds,
+        () => { pendingRefinementRef.current = false; });
     });
   }, [turns]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-solve
+  // Auto-solve → sentence-streaming TTS
   useEffect(() => {
     turns.forEach(t => {
       if (!t.isActive && masarResponses[t.id] && !streamingIds[t.id] && solutions[t.id] === undefined) {
-        streamSolve(t.id, masarResponses[t.id], techLevel, service.id, setSolutions, setSolvingIds, conversationHistory);
+        // Mark before starting so the auto-TTS trigger never fires for this turn
+        ttsTriggeredRef.current.add(t.id);
+
+        let sentencesQueued = 0;
+        const enqueue = (sentence) => {
+          sentencesQueued++;
+          enqueueSentenceAudio(sentence);
+        };
+        const onComplete = (fullText) => {
+          lastSpokenRef.current     = fullText;
+          lastSpokenTurnRef.current = t.id;
+          setHasLastSpoken(true);
+          // Fallback: if no sentences were sent (e.g. /tts-sentence unavailable), use standard TTS
+          if (sentencesQueued === 0) {
+            console.warn('[MASAR] sentence streaming queued nothing — falling back to playTTS');
+            playTTS(t.id, fullText);
+          }
+        };
+
+        streamSolveAndSpeak(
+          t.id, masarResponses[t.id], techLevel, service.id,
+          setSolutions, setSolvingIds, conversationHistory,
+          enqueue, onComplete,
+        );
       }
     });
   }, [masarResponses, streamingIds, turns]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -389,16 +424,33 @@ export default function Workspace() {
     if (prev !== 'idle' && masarState === 'idle') startRecording();
   }, [masarState, callActive]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Barge-in — independent mic monitor, active only while MASAR is speaking
+  // Barge-in — reads audioLevelRef (kept live by monitoring pipeline between turns)
   useEffect(() => {
-    return; // barge-in disabled - mic conflict
-  }, [callActive, masarState]);
+    if (!callActive || masarState !== 'speaking') return;
+
+    let rafId;
+    const detect = () => {
+      const level = audioLevelRef.current ?? 0;
+      if (level > VAD_THRESHOLDS[vadSensitivity]) {
+        console.log('[BARGE-IN] detected, stopping TTS, level:', level);
+        const activeTtsTurn = turns.find(t => ttsStates[t.id] && ttsStates[t.id] !== 'idle');
+        if (activeTtsTurn) stopTTS(activeTtsTurn.id);
+        stopSentencePlayback();
+        return;
+      }
+      rafId = requestAnimationFrame(detect);
+    };
+    rafId = requestAnimationFrame(detect);
+    return () => cancelAnimationFrame(rafId);
+  }, [callActive, masarState]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Unmount cleanup — release mic, TTS, and call state
   useEffect(() => {
     return () => {
       stopRecording();
+      stopMonitoring();
       stopTTS();
+      stopSentencePlayback();
       setCallActive(false);
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -448,28 +500,32 @@ export default function Workspace() {
   const ttsAudioCtxRef   = useRef(null);
   const ttsBufRef        = useRef(null);
 
-  // Trigger when any TTS track transitions to 'playing' (audioRef.current is set by then)
-  const anyTtsPlaying = Object.values(ttsStates).some(s => s === 'playing');
+  // Active whenever useTTS OR sentence streaming is playing
+  const anyTTSActive = masarSpeaking || sentenceSpeaking;
 
   useEffect(() => {
-    // Clean up any previous connection
-    if (ttsAudioCtxRef.current) {
-      ttsAudioCtxRef.current.close().catch(() => {});
-      ttsAudioCtxRef.current = null;
+    if (!anyTTSActive) {
+      // Tear down analyser when all TTS (both paths) has stopped
+      if (ttsAudioCtxRef.current) {
+        ttsAudioCtxRef.current.close().catch(() => {});
+        ttsAudioCtxRef.current = null;
+      }
+      ttsAnalyserRef.current   = null;
+      ttsBufRef.current        = null;
+      ttsAudioLevelRef.current = 0;
+      return;
     }
-    ttsAnalyserRef.current = null;
-    ttsBufRef.current      = null;
-    ttsAudioLevelRef.current = 0;
 
-    if (anyTtsPlaying && ttsAudioRef?.current) {
+    // useTTS path — sentence streaming sets up its own analyser in drainSentenceQueue
+    if (ttsAudioRef?.current) {
       try {
-        const ctx     = new AudioContext();
+        const ctx      = new AudioContext();
         const analyser = ctx.createAnalyser();
         analyser.fftSize = 1024;
         analyser.smoothingTimeConstant = 0.7;
         const source = ctx.createMediaElementSource(ttsAudioRef.current);
         source.connect(analyser);
-        analyser.connect(ctx.destination); // audio still plays through speakers
+        analyser.connect(ctx.destination);
         ttsAudioCtxRef.current = ctx;
         ttsAnalyserRef.current = analyser;
         ttsBufRef.current      = new Uint8Array(analyser.fftSize);
@@ -487,7 +543,7 @@ export default function Workspace() {
       ttsBufRef.current        = null;
       ttsAudioLevelRef.current = 0;
     };
-  }, [anyTtsPlaying]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [anyTTSActive]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── ResizeObserver — keep canvas sized to its CSS container ───────────────
   useEffect(() => {
@@ -528,6 +584,8 @@ export default function Workspace() {
         targetAmp = audioLevelRef.current;
       } else if (state === 'thinking') {
         targetAmp = Math.abs(Math.sin(Date.now() / 1000)) * 0.3;
+      } else if (state === 'preparing') {
+        targetAmp = Math.abs(Math.sin(Date.now() / 800)) * 0.2;
       } else if (state === 'speaking') {
         if (ttsAnalyserRef.current && ttsBufRef.current) {
           ttsAnalyserRef.current.getByteTimeDomainData(ttsBufRef.current);
@@ -562,6 +620,18 @@ export default function Workspace() {
       drawWave(ctx, W, H, baseline, amp,        phase1, cc.w1, lam1);
       drawWave(ctx, W, H, baseline, amp * 0.82, phase2, cc.w2, lam2);
 
+      // ── State text overlay ────────────────────────────────────────────────
+      if (state === 'thinking' || state === 'preparing') {
+        ctx.save();
+        ctx.font = '14px Cairo, sans-serif';
+        ctx.fillStyle = 'rgba(34,211,238,0.6)';
+        ctx.textAlign = 'center';
+        ctx.direction = 'rtl';
+        const text = state === 'thinking' ? 'مسار يفكر...' : 'مسار بيجهز الإجابة...';
+        ctx.fillText(text, canvas.width / 2, canvas.height * 0.62);
+        ctx.restore();
+      }
+
       rafId = requestAnimationFrame(render);
     };
 
@@ -577,11 +647,97 @@ export default function Workspace() {
     startRecording();
   }
 
+  // ── Sentence queue helpers ─────────────────────────────────────────────────
+
+  function enqueueSentenceAudio(sentence) {
+    // Start the ElevenLabs fetch immediately so it runs in parallel with playback
+    const urlPromise = fetch(`${API_BASE}/tts-sentence`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: sentence }),
+    }).then(async (res) => {
+      if (!res.ok) throw new Error(`tts-sentence HTTP ${res.status}`);
+      const blob = await res.blob();
+      return URL.createObjectURL(blob);
+    });
+
+    sentenceQueueRef.current.push(urlPromise);
+    drainSentenceQueue();
+  }
+
+  async function drainSentenceQueue() {
+    if (queueDrainingRef.current) return;
+    if (sentenceQueueRef.current.length === 0) return;
+
+    queueDrainingRef.current = true;
+    setSentenceSpeaking(true);
+
+    while (sentenceQueueRef.current.length > 0) {
+      const urlPromise = sentenceQueueRef.current.shift();
+      let url = null;
+      try {
+        url = await urlPromise;
+        const audio = new Audio(url);
+        sentenceAudioRef.current = audio;
+
+        // Connect to TTS analyser so the waveform animates during sentence playback
+        try {
+          if (!ttsAudioCtxRef.current || ttsAudioCtxRef.current.state === 'closed') {
+            ttsAudioCtxRef.current = new AudioContext();
+          }
+          const ctx = ttsAudioCtxRef.current;
+          if (ctx.state === 'suspended') await ctx.resume();
+          if (!ttsAnalyserRef.current) {
+            const analyser = ctx.createAnalyser();
+            analyser.fftSize = 256;
+            analyser.smoothingTimeConstant = 0.8;
+            ttsAnalyserRef.current = analyser;
+            ttsBufRef.current      = new Uint8Array(analyser.fftSize);
+            analyser.connect(ctx.destination);
+          }
+          const source = ctx.createMediaElementSource(audio);
+          source.connect(ttsAnalyserRef.current);
+        } catch (e) {
+          console.warn('[SENTENCE-TTS] analyser:', e.message);
+        }
+
+        await new Promise((resolve, reject) => {
+          audio.onended  = () => { URL.revokeObjectURL(url); resolve(); };
+          audio.onerror  = () => { URL.revokeObjectURL(url); reject(new Error('audio error')); };
+          audio.play().catch(reject);
+        });
+      } catch (err) {
+        console.warn('[SENTENCE-TTS] skipping sentence:', err.message);
+        if (url) URL.revokeObjectURL(url);
+      }
+      sentenceAudioRef.current = null;
+    }
+
+    queueDrainingRef.current = false;
+    setSentenceSpeaking(false);
+  }
+
+  function stopSentencePlayback() {
+    sentenceQueueRef.current = [];
+    if (sentenceAudioRef.current) {
+      sentenceAudioRef.current.pause();
+      sentenceAudioRef.current.src = '';
+      sentenceAudioRef.current = null;
+    }
+    queueDrainingRef.current = false;
+    setSentenceSpeaking(false);
+  }
+
+  // ── Call controls ──────────────────────────────────────────────────────────
+
   function endCall() {
     const activeTtsTurn = turns.find(t => ttsStates[t.id] && ttsStates[t.id] !== 'idle');
     if (activeTtsTurn) stopTTS(activeTtsTurn.id);
-    setCallActive(false);
+    stopSentencePlayback();
     stopRecording();
+    stopMonitoring();
+    pendingRefinementRef.current = false;
+    setCallActive(false);
   }
 
   async function _closeSupabaseSession() {
@@ -664,8 +820,12 @@ export default function Workspace() {
     setDiagramLoading({});
     setShowDiagramPrompt(false);
     setPendingDiagramTurnId(null);
-    diagramTriggeredRef.current = new Set();
-    promptedRef.current         = new Set();
+    diagramTriggeredRef.current  = new Set();
+    promptedRef.current          = new Set();
+    pendingRefinementRef.current = false;
+    sentenceQueueRef.current     = [];
+    queueDrainingRef.current     = false;
+    sentenceAudioRef.current     = null;
     await fetchSessions();
   }
 
@@ -786,7 +946,7 @@ export default function Workspace() {
       <canvas
         id="waveform-canvas"
         ref={canvasRef}
-        style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
+        style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', zIndex: 1 }}
       />
 
       {/* ── Dark overlay when showText ── */}
@@ -1218,9 +1378,10 @@ export default function Workspace() {
 
 /* ══ Layer 3: Refinement streaming ════════════════════════════════════════ */
 
-async function streamRefine(turnId, text, techLevel, serviceId, setMasarResponses, setStreamingIds) {
+async function streamRefine(turnId, text, techLevel, serviceId, setMasarResponses, setStreamingIds, onStart) {
   setMasarResponses(prev => ({ ...prev, [turnId]: '' }));
   setStreamingIds(prev => ({ ...prev, [turnId]: true }));
+  if (onStart) onStart();
   try {
     const res = await fetch(`${import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000'}/refine`, {
       method: 'POST',
@@ -1297,6 +1458,106 @@ async function streamSolve(turnId, refinedPrompt, techLevel, serviceId, setSolut
     }
   } catch (err) {
     setSolutions(prev => ({ ...prev, [turnId]: `[Error: ${err.message}]` }));
+  } finally {
+    setSolvingIds(prev => { const n = { ...prev }; delete n[turnId]; return n; });
+  }
+}
+
+/* ══ Layer 4+5: Sentence-streaming solve ══════════════════════════════════ */
+
+const SENTENCE_BOUNDARY = /[.؟!]/;
+const MIN_SENTENCE_LEN  = 15;
+
+function extractFirstSentence(buffer) {
+  for (let i = 0; i < buffer.length; i++) {
+    if (SENTENCE_BOUNDARY.test(buffer[i])) {
+      const sentence  = buffer.slice(0, i + 1).trim();
+      const remaining = buffer.slice(i + 1);
+      if (sentence.length >= MIN_SENTENCE_LEN) {
+        return { sentence, remaining };
+      }
+      // Sentence too short — keep scanning for a longer one
+    }
+  }
+  return null;
+}
+
+async function streamSolveAndSpeak(
+  turnId, refinedPrompt, techLevel, serviceId,
+  setSolutions, setSolvingIds, history,
+  enqueueSentence,  // (sentence: string) => void
+  onComplete,       // (fullText: string) => void
+) {
+  setSolutions(prev => ({ ...prev, [turnId]: '' }));
+  setSolvingIds(prev => ({ ...prev, [turnId]: true }));
+
+  let buffer   = '';
+  let fullText = '';
+
+  try {
+    const res = await fetch(`${import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000'}/solve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        refined_prompt: refinedPrompt,
+        tech_level:     techLevel,
+        service_id:     serviceId,
+        response_language: 'arabic',
+        history,
+      }),
+    });
+
+    if (!res.ok) {
+      setSolutions(prev => ({ ...prev, [turnId]: 'حصل خطأ في التوليد، حاول تاني' }));
+      setSolvingIds(prev => { const n = { ...prev }; delete n[turnId]; return n; });
+      onComplete('');
+      return;
+    }
+
+    const reader  = res.body.getReader();
+    const decoder = new TextDecoder();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      for (const line of decoder.decode(value, { stream: true }).split('\n')) {
+        if (!line.startsWith('data: ')) continue;
+        const payload = line.slice(6).trim();
+
+        if (payload === '[DONE]') {
+          // Flush remaining buffer as final sentence
+          const tail = buffer.trim();
+          if (tail.length >= MIN_SENTENCE_LEN) {
+            enqueueSentence(tail);
+          } else if (tail.length > 0 && fullText.length === tail.length) {
+            // Entire response was shorter than min — send it anyway
+            enqueueSentence(tail);
+          }
+          setSolvingIds(prev => { const n = { ...prev }; delete n[turnId]; return n; });
+          onComplete(fullText);
+          return;
+        }
+
+        try {
+          const token = JSON.parse(payload);
+          buffer   += token;
+          fullText += token;
+          setSolutions(prev => ({ ...prev, [turnId]: (prev[turnId] ?? '') + token }));
+
+          // Drain all complete sentences from the buffer
+          let extracted = extractFirstSentence(buffer);
+          while (extracted) {
+            enqueueSentence(extracted.sentence);
+            buffer    = extracted.remaining;
+            extracted = extractFirstSentence(buffer);
+          }
+        } catch { /* partial SSE frame */ }
+      }
+    }
+  } catch (err) {
+    setSolutions(prev => ({ ...prev, [turnId]: `[Error: ${err.message}]` }));
+    onComplete(fullText);
   } finally {
     setSolvingIds(prev => { const n = { ...prev }; delete n[turnId]; return n; });
   }

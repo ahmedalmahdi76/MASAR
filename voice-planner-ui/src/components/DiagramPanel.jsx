@@ -29,7 +29,10 @@ export default function DiagramPanel({ diagramCode, loading }) {
       .then(({ svg }) => {
         if (containerRef.current) containerRef.current.innerHTML = svg;
       })
-      .catch(() => {
+      .catch((err) => {
+        console.warn('[DIAGRAM] render failed:', err.message);
+        const errorEl = document.getElementById(id);
+        if (errorEl) errorEl.remove();
         if (containerRef.current) containerRef.current.innerHTML = '';
       });
   }, [diagramCode]);

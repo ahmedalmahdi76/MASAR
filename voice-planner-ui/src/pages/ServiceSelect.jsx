@@ -4,6 +4,7 @@ import { supabase } from '../supabase';
 import Spinner from '../components/Spinner';
 import ThemeToggle from '../components/ThemeToggle';
 import OnboardingTour from '../components/OnboardingTour';
+import { ILLUSTRATIONS } from '../components/ServiceIllustrations';
 
 const TOUR_STEPS_SERVICES = [
   {
@@ -486,6 +487,7 @@ function MenuBtn({ children, onClick, danger }) {
 /* ── Bento Card ── */
 
 function BentoCard({ service, onClick, loading }) {
+  const Illus = ILLUSTRATIONS[service.id];
   return (
     <button
       onClick={onClick}
@@ -504,6 +506,9 @@ function BentoCard({ service, onClick, loading }) {
       onMouseEnter={e => { if (!loading) e.currentTarget.style.borderColor = service.accent; }}
       onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--masar-border)'; }}
     >
+      {/* Decorative illustration — absolute behind all content */}
+      {Illus && <Illus />}
+
       {/* Top row — icon + arrow/spinner */}
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
         <span style={{

@@ -428,3 +428,16 @@ button:not(:disabled):active {
 .settings-section:nth-child(3) { animation-delay: 120ms; }
 .settings-section:nth-child(4) { animation-delay: 180ms; }
 .settings-section:nth-child(5) { animation-delay: 240ms; }
+
+/* ============================================
+   ILLUSTRATION ANIMATIONS
+   (ServiceIllustrations)
+   ============================================ */
+
+/* Disable all illustration animations for users who prefer reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .service-illus * {
+    animation: none !important;
+    transition: none !important;
+  }
+}

@@ -407,6 +407,41 @@ async def tts(req: TTSRequest) -> Response:
                         headers={"X-TTS-Error": str(e)})
 
 
+@app.post("/tts-sentence")
+async def tts_sentence(req: TTSRequest) -> Response:
+    """
+    Layer 5 variant: synthesize a single sentence for streaming TTS.
+    Input is already one sentence — no chunking needed.
+    Returns raw audio/mpeg bytes, same format as /tts.
+    """
+    if not elevenlabs_client:
+        return Response(content=b"", status_code=503,
+                        headers={"X-TTS-Error": "ELEVENLABS_API_KEY not configured"})
+
+    voice        = req.voice_id or DEFAULT_VOICE_ID or "UR972wNGq3zluze0LoIp"
+    loop         = asyncio.get_event_loop()
+    cleaned_text = clean_for_tts(req.text)
+    logger.info("TTS-sentence voice=%s chars=%d", voice, len(cleaned_text))
+
+    def _synthesize() -> bytes:
+        chunks = elevenlabs_client.text_to_speech.convert(
+            voice_id=voice,
+            text=cleaned_text,
+            model_id="eleven_multilingual_v2",
+            output_format="mp3_44100_128",
+        )
+        return b"".join(chunks)
+
+    try:
+        audio_bytes = await loop.run_in_executor(None, _synthesize)
+        return Response(content=audio_bytes, media_type="audio/mpeg",
+                        headers={"Cache-Control": "no-store"})
+    except Exception as e:
+        logger.error("TTS-sentence error: %s", e)
+        return Response(content=b"", status_code=502,
+                        headers={"X-TTS-Error": str(e)})
+
+
 def chunk_text(text: str, max_chars: int = 150) -> list:
     words, chunks, current = text.split(), [], ""
     for word in words:
@@ -537,6 +572,13 @@ graph LR
         )
         mermaid_code = message.content[0].text.strip()
         mermaid_code = mermaid_code.replace("```mermaid", "").replace("```", "").strip()
+        valid_starts = [
+            'graph ', 'flowchart ', 'sequenceDiagram', 'classDiagram',
+            'erDiagram', 'gantt', 'pie', 'gitGraph', 'mindmap',
+        ]
+        if not any(mermaid_code.startswith(s) for s in valid_starts):
+            logger.warning("Invalid Mermaid syntax returned: %s", mermaid_code[:100])
+            return {"diagram": None}
         logger.info("diagram generated service=%s chars=%d", req.service_id, len(mermaid_code))
         return {"diagram": mermaid_code}
     except Exception as e:
