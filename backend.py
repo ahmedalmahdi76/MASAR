@@ -302,6 +302,9 @@ class SolveRequest(BaseModel):
     service_id: str = "fiber"         # general → open-ended assistant
     response_language: str = "arabic" # arabic | english — Priority 5 toggle
     history: list[dict] = []          # [{user: str, assistant: str}, ...] last N turns
+    file_data: str = ""               # base64-encoded file bytes (optional)
+    file_type: str = ""               # "image" | "pdf"
+    file_mime: str = ""               # e.g. "image/png", "application/pdf"
 
 
 @app.post("/solve")
@@ -320,13 +323,38 @@ async def solve(req: SolveRequest) -> StreamingResponse:
     for turn in history:
         messages.append({"role": "user",      "content": turn["user"]})
         messages.append({"role": "assistant", "content": turn["assistant"]})
-    messages.append({"role": "user", "content": full_prompt})
+
+    # Build last user message — include file attachment if provided
+    if req.file_data:
+        if req.file_type == "image":
+            file_block = {
+                "type": "image",
+                "source": {"type": "base64", "media_type": req.file_mime, "data": req.file_data},
+            }
+        else:  # pdf
+            file_block = {
+                "type": "document",
+                "source": {"type": "base64", "media_type": "application/pdf", "data": req.file_data},
+            }
+        last_content = [file_block, {"type": "text", "text": full_prompt}]
+        logger.info("solve with file attachment type=%s mime=%s", req.file_type, req.file_mime)
+    else:
+        last_content = full_prompt
+
+    messages.append({"role": "user", "content": last_content})
+
+    # Use a vision-capable model when a file is attached
+    if req.file_data:
+        logger.info("File received type=%s mime=%s size=%d chars",
+                    req.file_type, req.file_mime, len(req.file_data))
+    _model = "claude-sonnet-4-6" if req.file_data else "claude-haiku-4-5-20251001"
+    logger.info("SOLVE model=%s has_file=%s", _model, bool(req.file_data))
 
     async def event_stream():
         _max_tokens = {'Beginner': 768, 'Professional': 1024, 'Expert': 2048}.get(req.tech_level, 1024)
         try:
             async with anthropic.messages.stream(
-                model="claude-haiku-4-5-20251001",
+                model=_model,
                 max_tokens=_max_tokens,
                 system=planning_prompt,
                 messages=messages,
@@ -584,3 +612,84 @@ graph LR
     except Exception as e:
         logger.error("Diagram error: %s", e)
         return {"diagram": None}
+
+
+# ── Engineering Calculation Sheet ────────────────────────────────────────────
+
+class CalculateRequest(BaseModel):
+    solution: str
+    service_id: str
+    tech_level: str = "Professional"
+
+
+@app.post("/calculate")
+async def calculate(req: CalculateRequest):
+    """Extract engineering calculations from a solution into structured JSON."""
+    system_prompt = """CRITICAL: Return ONLY a raw JSON object. No markdown fences, no explanation text, no preamble. Start your response with { and end with }. Nothing before or after.
+
+You are an engineering calculation engine for MASAR network planning assistant. Extract all numerical values and engineering parameters from the solution text and organize them into a structured calculation sheet.
+
+Return ONLY a valid JSON object with this exact structure:
+{
+  "title": "string — sheet title in English",
+  "service": "string — service domain",
+  "sections": [
+    {
+      "name": "string — section name",
+      "calculations": [
+        {
+          "parameter": "string — parameter name",
+          "symbol": "string — engineering symbol (optional, empty string if none)",
+          "value": "number or string — the extracted value",
+          "unit": "string — unit of measurement",
+          "formula": "string — formula used (optional, empty string if none)",
+          "standard": "string — IEEE/ITU reference (optional, empty string if none)"
+        }
+      ]
+    }
+  ],
+  "summary": "string — brief one-sentence technical summary"
+}
+
+Rules:
+- Extract ONLY values explicitly mentioned in the solution — do not fabricate values
+- Group related calculations into logical sections (e.g. Link Budget, Traffic Analysis)
+- Include units for every numeric value
+- Reference applicable standards (IEEE 802.x, ITU-T G.xxx, etc.) where relevant
+- Return valid JSON only — no markdown fences, no explanation, no preamble"""
+
+    last_error = None
+    for attempt in range(3):
+        try:
+            message = await anthropic.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=2000,
+                system=system_prompt,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        f"Extract all engineering calculations from this {req.service_id} "
+                        f"network planning solution (tech level: {req.tech_level}):\n\n"
+                        f"{req.solution}"
+                    ),
+                }],
+            )
+            raw_text = message.content[0].text.strip()
+            logger.info("CALC raw response (attempt %d): %s", attempt + 1, raw_text[:500])
+            # Aggressively clean any markdown or surrounding text
+            raw_text = re.sub(r'```json\s*|\s*```', '', raw_text).strip()
+            raw_text = re.sub(r'```\s*|\s*```', '', raw_text).strip()
+            # Extract from first { to last } in case there is preamble text
+            start = raw_text.find('{')
+            end   = raw_text.rfind('}')
+            if start != -1 and end != -1:
+                raw_text = raw_text[start:end + 1]
+            data = json.loads(raw_text)
+            logger.info("calculate service=%s sections=%d", req.service_id, len(data.get("sections", [])))
+            return data
+        except Exception as e:
+            last_error = e
+            logger.warning("CALC attempt %d failed: %s", attempt + 1, e)
+
+    logger.error("CALC all attempts failed: %s", last_error)
+    return {"error": "parse failed"}

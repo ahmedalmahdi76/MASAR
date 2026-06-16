@@ -8,6 +8,9 @@ import { supabase } from '../supabase';
 import OnboardingTour from '../components/OnboardingTour';
 import DiagramPromptBubble from '../components/DiagramPromptBubble';
 import DiagramPanel from '../components/DiagramPanel';
+import CalcSheetButton from '../components/CalcSheetButton';
+import CalcSheetPanel  from '../components/CalcSheetPanel';
+import FileUploadButton from '../components/FileUploadButton';
 import { exportSessionPDF } from '../utils/generatePDF';
 
 const TOUR_STEPS_WORKSPACE = [
@@ -48,6 +51,7 @@ const VAD_SILENCE_MS = 4000;
 const VAD_MIN_SPEECH = 600;
 
 const DIAGRAM_SERVICES = new Set(['topology','fiber','ip','redundancy','security','monitoring','capacity','qos']);
+const CALC_SERVICES    = new Set(['fiber','capacity','ip','redundancy','qos','monitoring','security']);
 const API_BASE = import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000';
 
 const DEFAULT_SERVICE = {
@@ -213,6 +217,18 @@ export default function Workspace() {
   const promptedRef          = useRef(new Set());
   const pendingRefinementRef = useRef(false);
 
+  const [calcSheets,        setCalcSheets]        = useState({});
+  const [calcLoading,       setCalcLoading]        = useState({});
+  const [showCalcButton,    setShowCalcButton]     = useState(false);
+  const [showCalcPanel,     setShowCalcPanel]      = useState(false);
+  const [pendingCalcTurnId, setPendingCalcTurnId]  = useState(null);
+  const calcTriggeredRef = useRef(new Set());
+  const calcPromptedRef  = useRef(new Set());
+
+  const [attachedFile, setAttachedFile] = useState(null);
+  const attachedFileRef = useRef(null);
+  useEffect(() => { attachedFileRef.current = attachedFile; }, [attachedFile]);
+
   const {
     ttsStates, play: playTTS, stop: stopTTS,
     isSpeaking: masarSpeaking, audioRef: ttsAudioRef,
@@ -284,6 +300,7 @@ export default function Workspace() {
           lastSpokenRef.current     = fullText;
           lastSpokenTurnRef.current = t.id;
           setHasLastSpoken(true);
+          setAttachedFile(null); // clear file after the turn that consumed it
           // Fallback: if no sentences were sent (e.g. /tts-sentence unavailable), use standard TTS
           if (sentencesQueued === 0) {
             console.warn('[MASAR] sentence streaming queued nothing — falling back to playTTS');
@@ -291,10 +308,14 @@ export default function Workspace() {
           }
         };
 
+        console.log('[FILE] attachedFile when solve fires:', attachedFile?.name, 'data length:', attachedFile?.data?.length);
+        console.log('[FILE] attachedFileRef when solve fires:', attachedFileRef.current?.name, 'data length:', attachedFileRef.current?.data?.length);
+
         streamSolveAndSpeak(
           t.id, masarResponses[t.id], techLevel, service.id,
           setSolutions, setSolvingIds, conversationHistory,
           enqueue, onComplete,
+          attachedFileRef.current,
         );
       }
     });
@@ -385,6 +406,24 @@ export default function Workspace() {
           setPendingDiagramTurnId(t.id);
           setShowDiagramPrompt(true);
         }, 1000);
+      }
+    });
+  }, [turns, solutions, solvingIds]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Calc sheet prompt — show button 1.5s after solution completes for numeric services
+  useEffect(() => {
+    turns.forEach(t => {
+      if (
+        !t.isActive &&
+        solutions[t.id] && !solvingIds[t.id] &&
+        CALC_SERVICES.has(service.id) &&
+        !calcPromptedRef.current.has(t.id)
+      ) {
+        calcPromptedRef.current.add(t.id);
+        setTimeout(() => {
+          setPendingCalcTurnId(t.id);
+          setShowCalcButton(true);
+        }, 1500);
       }
     });
   }, [turns, solutions, solvingIds]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -820,12 +859,20 @@ export default function Workspace() {
     setDiagramLoading({});
     setShowDiagramPrompt(false);
     setPendingDiagramTurnId(null);
+    setCalcSheets({});
+    setCalcLoading({});
+    setShowCalcButton(false);
+    setShowCalcPanel(false);
+    setPendingCalcTurnId(null);
     diagramTriggeredRef.current  = new Set();
     promptedRef.current          = new Set();
     pendingRefinementRef.current = false;
     sentenceQueueRef.current     = [];
     queueDrainingRef.current     = false;
     sentenceAudioRef.current     = null;
+    calcTriggeredRef.current     = new Set();
+    calcPromptedRef.current      = new Set();
+    setAttachedFile(null);
     await fetchSessions();
   }
 
@@ -938,6 +985,55 @@ export default function Workspace() {
     setShowDiagramPrompt(false);
     if (pendingDiagramTurnId) diagramTriggeredRef.current.add(pendingDiagramTurnId);
   }, [pendingDiagramTurnId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const fetchCalcSheet = async (turnId) => {
+    if (calcTriggeredRef.current.has(turnId)) return false;
+    calcTriggeredRef.current.add(turnId);
+    setCalcLoading(prev => ({ ...prev, [turnId]: true }));
+    try {
+      console.log('[CALC] calling /calculate with:', service.id, techLevel, 'solution length:', solutions[turnId]?.length);
+      const res  = await fetch(`${API_BASE}/calculate`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          solution:   solutions[turnId],
+          service_id: service.id,
+          tech_level: techLevel,
+        }),
+      });
+      console.log('[CALC] response status:', res.status, res.ok);
+      const data = await res.json();
+      console.log('[CALC] full response:', JSON.stringify(data));
+      console.log('[CALC] data.sections exists:', !!data?.sections);
+      console.log('[CALC] data keys:', Object.keys(data || {}));
+      console.log('[CALC] has sections:', !!data.sections, 'sections length:', data.sections?.length);
+      console.log('[CALC] fetchCalcSheet returning:', !!data.sections);
+      if (data.sections) {
+        setCalcSheets(prev => ({ ...prev, [turnId]: data }));
+        return true;
+      }
+    } catch (e) {
+      console.error('[CALC] fetch error:', e.message, e);
+      return false;
+    } finally {
+      setCalcLoading(prev => { const n = { ...prev }; delete n[turnId]; return n; });
+    }
+    return false;
+  };
+
+  const handleCalcClick = async () => {
+    if (calcSheets[pendingCalcTurnId]) {
+      setShowCalcPanel(true);
+      return;
+    }
+    const ok = await fetchCalcSheet(pendingCalcTurnId);
+    console.log('[CALC] fetchCalcSheet returned ok:', ok);
+    console.log('[CALC] showCalcPanel will be:', ok);
+    if (ok) {
+      console.log('[CALC] calling setShowCalcPanel(true)');
+      setShowCalcPanel(true);
+    }
+  };
 
   return (
     <div style={{ height: '100vh', width: '100vw', position: 'relative', overflow: 'hidden', background: theme === 'light' ? '#F0F4F8' : '#010508' }}>
@@ -1327,8 +1423,12 @@ export default function Workspace() {
               : <span>🎙</span>}
           </button>
 
-          {/* Spacer — mirrors replay width to keep mic centered */}
-          <div style={{ width: 40, height: 40, flexShrink: 0 }} />
+          {/* File upload — right of mic, mirrors replay button width */}
+          <FileUploadButton
+            attachedFile={attachedFile}
+            onFileAttached={setAttachedFile}
+            onRemove={() => setAttachedFile(null)}
+          />
 
         </div>
 
@@ -1371,6 +1471,22 @@ export default function Workspace() {
         onAccept={handleDiagramAccept}
         onDismiss={handleDiagramDismiss}
       />
+
+      <CalcSheetButton
+        visible={showCalcButton}
+        loading={!!calcLoading[pendingCalcTurnId]}
+        hasSheet={!!calcSheets[pendingCalcTurnId]}
+        onClick={handleCalcClick}
+      />
+
+      {(() => { console.log('[CALC] panel render check:', 'showCalcPanel:', showCalcPanel, 'hasData:', !!calcSheets[pendingCalcTurnId]); return null; })()}
+      {showCalcPanel && calcSheets[pendingCalcTurnId] && (
+        <CalcSheetPanel
+          data={calcSheets[pendingCalcTurnId]}
+          onClose={() => setShowCalcPanel(false)}
+          turnId={pendingCalcTurnId}
+        />
+      )}
 
     </div>
   );
@@ -1485,11 +1601,13 @@ function extractFirstSentence(buffer) {
 async function streamSolveAndSpeak(
   turnId, refinedPrompt, techLevel, serviceId,
   setSolutions, setSolvingIds, history,
-  enqueueSentence,  // (sentence: string) => void
-  onComplete,       // (fullText: string) => void
+  enqueueSentence,      // (sentence: string) => void
+  onComplete,           // (fullText: string) => void
+  attachedFile = null,  // { data, type, mime, name } | null
 ) {
   setSolutions(prev => ({ ...prev, [turnId]: '' }));
   setSolvingIds(prev => ({ ...prev, [turnId]: true }));
+  console.log('[FILE] streamSolveAndSpeak received file:', attachedFile?.name, 'data length:', attachedFile?.data?.length);
 
   let buffer   = '';
   let fullText = '';
@@ -1499,11 +1617,14 @@ async function streamSolveAndSpeak(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        refined_prompt: refinedPrompt,
-        tech_level:     techLevel,
-        service_id:     serviceId,
+        refined_prompt:    refinedPrompt,
+        tech_level:        techLevel,
+        service_id:        serviceId,
         response_language: 'arabic',
         history,
+        file_data: attachedFile?.data ?? '',
+        file_type: attachedFile?.type ?? '',
+        file_mime: attachedFile?.mime ?? '',
       }),
     });
 
