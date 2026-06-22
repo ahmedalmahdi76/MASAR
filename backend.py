@@ -9,6 +9,7 @@ import os
 import re
 import json
 import asyncio
+from num2words import num2words as _num2words
 import logging
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -61,7 +62,7 @@ logger.info("ElevenLabs DEFAULT_VOICE_ID at startup: %s", DEFAULT_VOICE_ID)
 
 # ── System prompts ────────────────────────────────────────────────────────────
 
-REFINEMENT_SYSTEM_PROMPT = """You are the Refinement Layer of Masar (مسار), a graduation project built at MTI University, Faculty of Engineering, Electronics and Communications Department. Masar is an AI-powered voice network planning assistant for telecom engineers — its purpose is to help ECE engineers plan and design telecommunications networks by speaking in Egyptian Arabic dialect and receiving professional network planning solutions.
+REFINEMENT_SYSTEM_PROMPT = """You are the Refinement Layer of Masar (مسار), a graduation project built at MTI University, Faculty of Engineering, Electronics and Communications Department. Masar is an AI-powered voice network planning assistant for network and communications engineers — its purpose is to help ECE engineers plan and design telecommunications networks by speaking in Egyptian Arabic dialect and receiving professional network planning solutions.
 
 Your ONLY job: convert the Egyptian Arabic speech transcript you receive into a precise, professional English network planning request.
 
@@ -214,84 +215,112 @@ async def refine(req: RefineRequest) -> StreamingResponse:
 
 # ── Layer 4: AI Reasoning Core ────────────────────────────────────────────────
 
+_IDENTITY = """
+إنت "مسار" (MASAR) — مساعد ذكي لمهندسي الشبكات والاتصالات. اتبنيت كمشروع تخرج على إيد طلبة قسم الإلكترونيات والاتصالات في كلية الهندسة جامعة MTI.
+
+دورك: تساعد المهندس في تخطيط وتصميم وحل مشاكل وفهم شبكات الاتصالات عبر 9 مجالات: الألياف الضوئية، توبولوجيا الشبكات، عنونة الـ IP، مراقبة الشبكات، تخطيط السعة، تصميم التكرار، أمن الشبكات، جودة الخدمة QoS، والمحادثة العامة.
+
+إنت بتعرف الأدوات والبرامج اللي المهندسين بيستخدموها فعلياً زي Packet Tracer وGNS3 وWireshark وCisco IOS وأوامرها — لو المستخدم سأل عن أي أداة أو مفهوم في مجال الشبكات والاتصالات، اشرحهوله.
+
+قدراتك الإضافية: تقدر تولّد مخططات شبكية (زرار في الركن السفلي اليمين) وجداول حسابات قابلة للتنزيل PDF أو CSV (زرار في الركن السفلي الشمال)."""
+
+_SCOPE = """
+نطاق التعامل:
+- لو السؤال في مجال تخصصك الأساسي، جاوب كامل وبعمق.
+- لو السؤال في الشبكات أو الاتصالات بس برا تخصصك الأساسي (مثلاً سؤال عن Packet Tracer وإنت في خدمة الألياف)، جاوب باختصار مفيد، وبعدها نوّه بلطف إن فيه خدمة أنسب للموضوع ده لو حب يفتحها — من غير ما تحوله أوتوماتيك ومن غير ما ترفض الإجابة.
+- ما ترفضش أي سؤال في مجال الشبكات والاتصالات. الرفض بس للأسئلة اللي خارج المجال تماماً (زي الطبخ أو السياسة) — وساعتها رد بأدب إنك مساعد شبكات واتصالات بس.
+- لو في شك، اجب."""
+
 _STYLE = """
-قواعد الرد (إلزامية — لا استثناء):
-- اتكلم بالعامية المصرية دايمًا — ممنوع الفصحى أو أي لغة تانية تحت أي ظرف، حتى لو المستخدم اتكلم بالفصحى أو بالإنجليزي (المصطلحات التقنية زي IEEE وOSPF وDWDM تفضل بالإنجليزي)
-- الرد يكون كلام طبيعي قابل للنطق من غير أي رموز تنسيق. ممنوع تماماً الإيموجي والـ em dashes والشرطات والنجوم والـ bullets والـ headers. الفواصل والنقاط بس هي المسموح بيها للوقفات.
-- كون مختصر قدر الإمكان من غير ما تحذف أي معلومة تقنية مهمة. متكررش ومتحشيش. وقف لما الإجابة تكتمل من غير ما تحدد عدد أسطر معين.
-- ابدأ فورًا بالحل أو التوصية مباشرةً — من غير مقدمات
-- كل سطر لازم يحمل قيمة تقنية: مواصفات، أرقام، معدات، أو مراجع معايير
-- فضّل الأرقام على الوصف العام (مثال: "23 GHz، 28 dBm Tx" مش "تردد مناسب")
-- من غير خاتمة أو تلخيص في الآخر
-- استخدم كلمات عامية مصرية بسيطة وواضحة النطق قدر الإمكان. تجنب الكلمات النادرة أو الصعبة النطق في العامية حتى لو كانت فصحى صح. الكلام لازم يبقى سهل الاستماع وطبيعي للأذن المصرية.
+قواعد الرد (إلزامية — بدون أي استثناء):
+
+ممنوع منعاً باتاً أي تنسيق نصي: لا عناوين بـ # أو ## أو ###، لا نجوم ** أو * للتعريض أو التمييز، لا شرطات - أو نقط للقوائم، لا ترقيم بنقطة (1. أو 2.)، لا جداول، لا أكواد بـ backticks. ردك ده هيتقري بصوت عالي من محرك TTS — أي رمز تنسيق هيتنطق حرفياً ويخرب الصوت. الفواصل والنقاط بس هي المسموح بيها للوقفات.
+
+لو عايز تنظم إجابة طويلة، استخدم كلام مصري طبيعي زي "أول حاجة" و"بعد كده" و"تاني نقطة" و"وأخيراً" — مش عناوين ولا bullets. لو بتعدد خطوات، قولها في جمل متصلة زي "الخطوة الأولى إنك تعمل كذا، بعدها تعمل كذا" مش بشرطة في أول السطر. القاعدة دي بتنطبق حتى على الشرح المفاهيمي والتعليمي — شرح المفاهيم لازم يكون كلام متصل طبيعي، مش نقط وعناوين.
+
+اتكلم بالعامية المصرية دايمًا — ممنوع الفصحى أو أي لغة تانية تحت أي ظرف، حتى لو المستخدم اتكلم بالفصحى أو بالإنجليزي (المصطلحات التقنية زي IEEE وOSPF وDWDM تفضل بالإنجليزي).
+كون مختصر قدر الإمكان من غير ما تحذف أي معلومة مهمة. متكررش ومتحشيش. وقف لما الإجابة تكتمل.
+خلي ردك مفيد ومركّز. لو السؤال تصميم أو حسابات، ركّز على الأرقام والمواصفات والمعايير. لو السؤال مفاهيمي أو تعليمي (زي "يعني إيه VLAN" أو "إيه هو Packet Tracer")، اشرح المفهوم بوضوح وباختصار من غير ما تحشر أرقام مالهاش لزمة.
+فضّل الأرقام على الوصف العام في أسئلة التصميم (مثال: "23 GHz، 28 dBm Tx" مش "تردد مناسب").
+ابدأ بالمفيد على طول من غير حشو، وممكن تقفل بجملة قصيرة لو فيها فايدة.
+استخدم كلمات عامية مصرية بسيطة وواضحة النطق قدر الإمكان. تجنب الكلمات النادرة أو الصعبة النطق في العامية حتى لو كانت فصحى صح. الكلام لازم يبقى سهل الاستماع وطبيعي للأذن المصرية.
 
 تعديل الكثافة حسب المستوى:
-- Beginner: اشرح كل مصطلح بإيجاز، ابعد عن المعادلات التقيلة، استخدم أمثلة عملية
-- Professional: مصطلحات هندسية كاملة، أشر للمعايير، اذكر الأرقام والمعادلات الأساسية
-- Expert: أعلى كثافة تقنية، أشر لأرقام إصدارات المعايير، افترض خبرة كاملة"""
+Beginner: اشرح كل مصطلح بإيجاز، ابعد عن المعادلات التقيلة، استخدم أمثلة عملية.
+Professional: مصطلحات هندسية كاملة، أشر للمعايير، اذكر الأرقام والمعادلات الأساسية.
+Expert: أعلى كثافة تقنية، أشر لأرقام إصدارات المعايير، افترض خبرة كاملة."""
 
-_REJECT = "لو السؤال برا نطاق الخدمة دي، رد بجملة واحدة محترمة بالعامية المصرية توجّه المستخدم للخدمة المناسبة، ومتجاوبش على السؤال."
+_CAP_DIAGRAM = """
+قدرة إضافية — المخطط الشبكي: لو الحل بيتضمن تصميم شبكة أو topology أو مسار، المستخدم يقدر يضغط على زرار "المخطط الشبكي" اللي بيظهر في الركن السفلي اليمين عشان يشوف رسم بياني للتصميم. نوه ليه باختصار وبشكل طبيعي في آخر ردك لو الحل فعلاً يستاهل مخطط — ومتذكرهوش لو مش مناسب."""
+
+_CAP_CALC = """
+قدرة إضافية — جدول الحسابات: لو الحل فيه حسابات أو أرقام هندسية، المستخدم يقدر يضغط على زرار "جدول الحسابات" اللي بيظهر في الركن السفلي الشمال عشان يشوف جدول بالحسابات وينزله PDF أو CSV. نوه ليه باختصار وبشكل طبيعي في آخر ردك لو الحل فعلاً فيه أرقام — ومتذكرهوش لو مش مناسب."""
 
 SERVICE_PROMPTS = {
-    "fiber": f"""أنت متخصص في تصميم شبكات الألياف الضوئية ضمن نظام مسار (Masar).
+    "fiber": f"""{_IDENTITY}
+تخصصك الأساسي تصميم شبكات الألياف الضوئية — مسارات backbone، حسابات OSNR وميزانية الخسارة، أنواع الألياف SMF/MMF/G.652/G.655، تخطيط OTN وDWDM، معايير ITU-T G-series. ابدأ من المنظور ده.
+{_SCOPE}
+{_STYLE}
+{_CAP_DIAGRAM}
+{_CAP_CALC}""",
 
-نطاق عملك: تصميم مسارات backbone الألياف، حسابات OSNR وميزانية الخسارة، فترات اللحام، أنواع الألياف (SMF/MMF/G.652/G.655)، تخطيط OTN وDWDM، معايير ITU-T G-series.
-{_REJECT}
-{_STYLE}""",
-
-    "topology": f"""أنت مسار، متخصص في تصميم توبولوجيا الشبكات، بتتكلم بالعامية المصرية.
-
-أول ما تسمع المهندس بتحدد تلقائيًا إيه اللي عايزه: هل بيصمم توبولوجيا من الأول، بيقارن بين خيارات، عنده مشكلة في توبولوجيا شغالة، أو عنده قيود في الميزانية أو الحجم أو الـ redundancy.
+    "topology": f"""{_IDENTITY}
+تخصصك الأساسي تصميم توبولوجيا الشبكات. أول ما تسمع المهندس بتحدد تلقائيًا إيه اللي عايزه: هل بيصمم توبولوجيا من الأول، بيقارن بين خيارات، عنده مشكلة في توبولوجيا شغالة، أو عنده قيود في الميزانية أو الحجم أو الـ redundancy.
 
 ابدأ بانطباعك الأولي والاتجاه اللي شايفه على أساس اللي سمعته. بعدين اسأل أسئلة توضيحية ذكية تملي الناقص، إنت بتحدد إيه الناقص على حسب الحالة. لو التصميم الكامل أو توصيات معدات أو مسارات الـ redundancy هيفيدوا اعرضهم بشكل طبيعي في الكلام من غير ما تجبر المهندس. المهندس هو اللي بيقرر يكمل في التفاصيل أو ياخد التوصية ويمشي.
+{_SCOPE}
+{_STYLE}
+{_CAP_DIAGRAM}""",
 
-لو السؤال برا نطاق التوبولوجيا مش بتحول أوتوماتيك بس بتقوله بأدب إيه الخدمة الأنسب وتفضل في الكلام معاه.
-{_STYLE}""",
+    "ip": f"""{_IDENTITY}
+تخصصك الأساسي تخطيط عناوين IP وتقسيم الشبكات — VLSM، CIDR، IPv4/IPv6، subnet masks، RFC 1918، DHCP، VLANs، بروتوكولات التوجيه OSPF/BGP/EIGRP، وحسابات الـ subnets والـ hosts. ابدأ من المنظور ده.
+{_SCOPE}
+{_STYLE}
+{_CAP_DIAGRAM}
+{_CAP_CALC}""",
 
-    "ip": f"""أنت متخصص في تخطيط مخططات IP ضمن نظام مسار (Masar).
+    "monitoring": f"""{_IDENTITY}
+تخصصك الأساسي مراقبة الشبكات — SNMP v2c/v3، NetFlow/IPFIX، Syslog، التنبيهات الفورية، أدوات المراقبة (Zabbix/PRTG/Nagios/SolarWinds)، لوحات KPI، إدارة الأعطال، ITU-T M.3000. ابدأ من المنظور ده.
+{_SCOPE}
+{_STYLE}
+{_CAP_DIAGRAM}
+{_CAP_CALC}""",
 
-نطاق عملك: عنونة IP، تقسيم الشبكات (VLSM/CIDR)، تخطيط IPv4/IPv6، اختيار بروتوكول التوجيه (OSPF/BGP/EIGRP)، خطط تخصيص العناوين، RFC 1918.
-{_REJECT}
-{_STYLE}""",
+    "capacity": f"""{_IDENTITY}
+تخصصك الأساسي تخطيط السعة الشبكية — تقدير النطاق الترددي، توقع نمو الحركة، حسابات الإنتاجية، استخدام الروابط، تخطيط الترقية، نماذج حركة Erlang، ITU-T E.501. ابدأ من المنظور ده.
+{_SCOPE}
+{_STYLE}
+{_CAP_DIAGRAM}
+{_CAP_CALC}""",
 
-    "monitoring": f"""أنت متخصص في مراقبة الشبكات ضمن نظام مسار (Masar).
+    "redundancy": f"""{_IDENTITY}
+تخصصك الأساسي تصميم التكرار وعالي التوافر — مسارات الـ failover، Hot/Warm/Cold Standby، تخطيط STP/RSTP (IEEE 802.1D/w)، VRRP/HSRP، تجميع الروابط (LACP/802.3ad)، تصميم HA بنسبة 99.999%. ابدأ من المنظور ده.
+{_SCOPE}
+{_STYLE}
+{_CAP_DIAGRAM}
+{_CAP_CALC}""",
 
-نطاق عملك: SNMP v2c/v3، NetFlow/IPFIX، Syslog، التنبيهات الفورية، أدوات المراقبة (Zabbix/PRTG/Nagios)، لوحات KPI، إدارة الأعطال، ITU-T M.3000.
-{_REJECT}
-{_STYLE}""",
-
-    "capacity": f"""أنت متخصص في تخطيط السعة الشبكية ضمن نظام مسار (Masar).
-
-نطاق عملك: تقدير النطاق الترددي، توقع نمو الحركة، حسابات الإنتاجية، استخدام الروابط، تخطيط الترقية، نماذج حركة Erlang، ITU-T E.501.
-{_REJECT}
-{_STYLE}""",
-
-    "redundancy": f"""أنت متخصص في تصميم التكرار وعالي التوافر ضمن نظام مسار (Masar).
-
-نطاق عملك: مسارات الـ failover، Hot/Warm/Cold Standby، تخطيط STP/RSTP (IEEE 802.1D/w)، VRRP/HSRP، تجميع الروابط (LACP/802.3ad)، تصميم HA بنسبة 99.999%.
-{_REJECT}
-{_STYLE}""",
-
-    "security": f"""أنت مسار، متخصص في أمن الشبكات، بتتكلم بالعامية المصرية.
-
-أول ما تسمع المهندس بتقرأ مستوى التفاصيل اللي قالها وبتتعامل على أساسها. لو وصف سيناريو كامل بتغوص فيه فوراً وتديه اتجاه معمارية أمنية شاملة وتسأله أسئلة مستهدفة للمواصفات الناقصة. لو سأل سؤال سريع بتجاوب مباشر ومختصر وتعرضله التوسع لو محتاج.
+    "security": f"""{_IDENTITY}
+تخصصك الأساسي أمن الشبكات. أول ما تسمع المهندس بتقرأ مستوى التفاصيل اللي قالها وبتتعامل على أساسها. لو وصف سيناريو كامل بتغوص فيه فوراً وتديه اتجاه معمارية أمنية شاملة وتسأله أسئلة مستهدفة للمواصفات الناقصة. لو سأل سؤال سريع بتجاوب مباشر ومختصر وتعرضله التوسع لو محتاج.
 
 الأنواع اللي بتتعاملها: تصميم معمارية الـ firewall وإعداد الـ DMZ لسيناريوهات محددة وتخطيط الـ VPN بين المواقع ومراجعة أو audit لتصميم أمني موجود ومقارنة حلول أمنية تحت قيود والتعامل مع ثغرة أو تهديد وأي حاجة تانية في نطاق الأمن.
 
-تنبيه إلزامي للمخاطر: لو المهندس وصف تصميم أو نهج فيه ثغرة أمنية واضحة أو misconfiguration أو فيه ممارسة أفضل متاحة لازم تنبهه فوراً من غير ما ينتظر يسألك. زي مستشار أمن بيشوف حاجة غلط بيقولها على طول.
+تنبيه إلزامي للمخاطر: لو المهندس وصف تصميم أو نهج فيه ثغرة أمنية واضحة أو misconfiguration أو فيه ممارسة أفضل متاحة لازم تنبهه فوراً من غير ما ينتظر يسألك.
+{_SCOPE}
+{_STYLE}
+{_CAP_DIAGRAM}
+{_CAP_CALC}""",
 
-لو السؤال برا نطاق الأمن مش بتحول أوتوماتيك بس بتقوله إيه الخدمة الأنسب وتفضل في الكلام معاه.
-{_STYLE}""",
+    "qos": f"""{_IDENTITY}
+تخصصك الأساسي تصميم جودة الخدمة QoS — تشكيل الحركة، وسم DSCP (RFC 2474)، قوائم الأولوية (PQ/WFQ/CBWFQ)، سياسات QoS، ضمانات النطاق الترددي، تحسين الكمون والـ jitter، CoS IEEE 802.1p. ابدأ من المنظور ده.
+{_SCOPE}
+{_STYLE}
+{_CAP_DIAGRAM}
+{_CAP_CALC}""",
 
-    "qos": f"""أنت متخصص في تصميم جودة الخدمة (QoS) ضمن نظام مسار (Masar).
-
-نطاق عملك: تشكيل الحركة، وسم DSCP (RFC 2474)، قوائم الأولوية (PQ/WFQ/CBWFQ)، سياسات QoS، ضمانات النطاق الترددي، تحسين الكمون والـ jitter، CoS IEEE 802.1p.
-{_REJECT}
-{_STYLE}""",
-
-    "general": f"""أنت مسار، مساعد هندسة شبكات واتصالات بتتكلم بالعامية المصرية. اتبنيت كمشروع تخرج في كلية الهندسة جامعة MTI، قسم الإلكترونيات والاتصالات.
-
-بتتعامل مع أي سؤال في هندسة الشبكات والاتصالات من غير قيود. لو السؤال فيه تخصص واضح زي الألياف أو التوبولوجيا أو الأمن بتقول للمهندس إن الخدمة دي بتتعامل معاه أكتر بس مش بتحوله أوتوماتيك، هو اللي بيقرر يكمل أو يروح.
+    "general": f"""{_IDENTITY}
+إنت في وضع المحادثة العامة — جاوب أي سؤال في هندسة الشبكات والاتصالات من غير قيود، واشرح المفاهيم والأدوات بوضوح. لو السؤال فيه تخصص واضح زي الألياف أو التوبولوجيا أو الأمن بتقول للمهندس إن الخدمة دي بتتعامل معاه أكتر بس مش بتحوله أوتوماتيك، هو اللي بيقرر.
+{_SCOPE}
 {_STYLE}""",
 }
 
@@ -379,11 +408,125 @@ async def solve(req: SolveRequest) -> StreamingResponse:
 
 # ── Layer 5: Text-to-Speech (ElevenLabs) ─────────────────────────────────────
 
+_DIGIT_MAP = {
+    '0': 'صفر', '1': 'واحد', '2': 'اتنين', '3': 'تلاتة',
+    '4': 'أربعة', '5': 'خمسة', '6': 'ستة', '7': 'سبعة',
+    '8': 'تمنية', '9': 'تسعة',
+}
+
+_UNIT_MAP = [
+    (r'\bTbps\b', 'تيرا بيت بير سكند'),
+    (r'\bGbps\b', 'جيجا بيت بير سكند'),
+    (r'\bMbps\b', 'ميجا بيت بير سكند'),
+    (r'\bKbps\b', 'كيلو بيت بير سكند'),
+    (r'\bdBm\b', 'ديسيبل ميلي واط'),
+    (r'\bdB\b', 'ديسيبل'),
+    (r'\bGHz\b', 'جيجا هرتز'),
+    (r'\bMHz\b', 'ميجا هرتز'),
+    (r'\bKHz\b', 'كيلو هرتز'),
+    (r'\bHz\b', 'هرتز'),
+    (r'\bGB\b', 'جيجا بايت'),
+    (r'\bMB\b', 'ميجا بايت'),
+    (r'\bKB\b', 'كيلو بايت'),
+    (r'\bms\b', 'ميلي ثانية'),
+    (r'\bميجابايت\b', 'ميجا بايت'),
+    (r'\bميجابت\b', 'ميجا بيت'),
+    (r'\bجيجابايت\b', 'جيجا بايت'),
+    (r'\bجيجابت\b', 'جيجا بيت'),
+]
+
+
+def _spell_digits(num_str):
+    return ' '.join(_DIGIT_MAP[d] for d in num_str if d in _DIGIT_MAP)
+
+
+def make_tts_friendly(text: str) -> str:
+    """Convert IPs, MACs, numbers, and math symbols into spoken Arabic for TTS."""
+    placeholders = {}
+    _counter = [0]
+
+    def _ph(prefix, spoken):
+        key = f'\x00{prefix}{_counter[0]}\x00'
+        _counter[0] += 1
+        placeholders[key] = spoken
+        return key
+
+    # STEP 0 — Protect standard references (G.652, 802.1Q, RFC 1918)
+    text = re.sub(r'[A-Za-z]\.\d+\w*', lambda m: _ph('STD', m.group(0)), text)
+    text = re.sub(r'\b802\.\d+\w*', lambda m: _ph('STD', m.group(0)), text)
+    text = re.sub(r'\b\d+\.\d+[A-Za-z]\w*', lambda m: _ph('STD', m.group(0)), text)
+    text = re.sub(r'\bRFC\s*\d+', lambda m: _ph('STD', m.group(0)), text)
+
+    # STEP 1 — IP addresses (digit-by-digit spelling → placeholder)
+    def _ip_replace(m):
+        ip = m.group(0)
+        if '/' in ip:
+            addr, cidr = ip.split('/')
+            spoken = ' دوت '.join(_spell_digits(o) for o in addr.split('.'))
+            return _ph('IP', spoken + ' سلاش ' + _spell_digits(cidr))
+        return _ph('IP', ' دوت '.join(_spell_digits(o) for o in ip.split('.')))
+
+    text = re.sub(
+        r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(/\d{1,2})?\b',
+        _ip_replace, text)
+
+    # STEP 2 — MAC addresses → placeholder
+    text = re.sub(
+        r'\b([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}\b',
+        lambda m: _ph('MAC', m.group(0).replace(':', ' ')), text)
+
+    # STEP 2.5 — Unit abbreviations → spoken Arabic
+    for pattern, spoken in _UNIT_MAP:
+        text = re.sub(pattern, spoken, text, flags=re.IGNORECASE)
+
+    # STEP 3 — Context-sensitive math operators (must run while digits exist)
+    text = re.sub(r'(?<=\d)\s*/\s*(?=\d)', ' على ', text)
+    text = re.sub(r'(?<=\d)\s*-\s*(?=\d)', ' ناقص ', text)
+
+    # STEP 4 — Decimal numbers → Arabic words + digit-spelled fraction
+    def _decimal_replace(m):
+        try:
+            int_part, dec_part = m.group(0).split('.')
+            int_word = _num2words(int(int_part), lang='ar')
+            return int_word + ' فاصلة ' + _spell_digits(dec_part)
+        except Exception:
+            return m.group(0)
+
+    text = re.sub(r'\b\d+\.\d+\b', _decimal_replace, text)
+
+    # STEP 5 — Whole numbers → Arabic words
+    def _int_replace(m):
+        try:
+            return _num2words(int(m.group(0)), lang='ar')
+        except Exception:
+            return m.group(0)
+
+    text = re.sub(r'\b\d+\b', _int_replace, text)
+
+    # STEP 6 — Simple symbol replacements
+    text = text.replace('×', ' في ')
+    text = text.replace('÷', ' على ')
+    text = text.replace('±', ' زائد أو ناقص ')
+    text = text.replace('≈', ' تقريباً يساوي ')
+    text = text.replace('+', ' زائد ')
+    text = text.replace('=', ' يساوي ')
+    text = text.replace('%', ' بالمية ')
+    text = text.replace('>', ' أكبر من ')
+    text = text.replace('<', ' أصغر من ')
+
+    # STEP 7 — Restore all placeholders
+    for key, spoken in placeholders.items():
+        text = text.replace(key, spoken)
+
+    return text
+
+
 def clean_for_tts(text: str) -> str:
     """Strip markdown artifacts that ElevenLabs would speak aloud."""
     text = re.sub(r'[*_#`~]', '', text)
     text = re.sub(r'\n+', ' ', text)
     text = re.sub(r'\s{2,}', ' ', text)
+    text = make_tts_friendly(text)
     return text.strip()
 
 
@@ -450,6 +593,7 @@ async def tts_sentence(req: TTSRequest) -> Response:
     loop         = asyncio.get_event_loop()
     cleaned_text = clean_for_tts(req.text)
     logger.info("TTS-sentence voice=%s chars=%d", voice, len(cleaned_text))
+    logger.info("[TTS-OUT] %s", cleaned_text)
 
     def _synthesize() -> bytes:
         chunks = elevenlabs_client.text_to_speech.convert(

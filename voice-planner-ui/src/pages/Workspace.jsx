@@ -689,7 +689,7 @@ export default function Workspace() {
   // ── Sentence queue helpers ─────────────────────────────────────────────────
 
   function enqueueSentenceAudio(sentence) {
-    // Start the ElevenLabs fetch immediately so it runs in parallel with playback
+    console.log('[SENTENCE] queuing:', sentence.substring(0, 60));
     const urlPromise = fetch(`${API_BASE}/tts-sentence`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1587,12 +1587,15 @@ const MIN_SENTENCE_LEN  = 15;
 function extractFirstSentence(buffer) {
   for (let i = 0; i < buffer.length; i++) {
     if (SENTENCE_BOUNDARY.test(buffer[i])) {
+      if (buffer[i] === '.' && i > 0 && i < buffer.length - 1 &&
+          /\d/.test(buffer[i - 1]) && /\d/.test(buffer[i + 1])) {
+        continue;
+      }
       const sentence  = buffer.slice(0, i + 1).trim();
       const remaining = buffer.slice(i + 1);
       if (sentence.length >= MIN_SENTENCE_LEN) {
         return { sentence, remaining };
       }
-      // Sentence too short — keep scanning for a longer one
     }
   }
   return null;

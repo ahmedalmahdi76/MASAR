@@ -38,16 +38,67 @@ export default function DiagramPanel({ diagramCode, loading }) {
   }, [diagramCode]);
 
   const handleDownload = () => {
-    if (!containerRef.current) return;
-    const svg = containerRef.current.innerHTML;
-    if (!svg) return;
-    const blob = new Blob([svg], { type: 'image/svg+xml' });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href     = url;
-    a.download = 'diagram.svg';
-    a.click();
-    URL.revokeObjectURL(url);
+    try {
+      const svgElement = containerRef.current?.querySelector('svg');
+      if (!svgElement) return;
+
+      let svgStr = new XMLSerializer().serializeToString(svgElement);
+      svgStr = svgStr.replace(/<br>/g, '<br/>');
+
+      // Strip external font references that taint the canvas
+      svgStr = svgStr.replace(/@import[^;]+;/g, '');
+      svgStr = svgStr.replace(/url\(['"]?https?:\/\/[^)]+\)/g, '');
+
+      // Resolve dimensions — fall back to viewBox when width is "100%"
+      let w = svgElement.width?.baseVal?.value;
+      let h = svgElement.height?.baseVal?.value;
+      if (!w || !h) {
+        const vb = svgElement.getAttribute('viewBox');
+        if (vb) {
+          const parts = vb.split(' ');
+          w = parseFloat(parts[2]);
+          h = parseFloat(parts[3]);
+        }
+      }
+      if (!w) w = 800;
+      if (!h) h = 600;
+
+      // Encode as base64 data URI to avoid canvas taint
+      const svgBase64 = btoa(unescape(encodeURIComponent(svgStr)));
+      const url = 'data:image/svg+xml;base64,' + svgBase64;
+      const img = new Image();
+
+      img.onload = () => {
+        const scale = 2;
+        const pad = 40;
+        const canvas = document.createElement('canvas');
+        canvas.width  = w * scale + pad * 2;
+        canvas.height = h * scale + pad * 2;
+        const ctx = canvas.getContext('2d');
+
+        ctx.fillStyle = '#0D1117';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, pad, pad, w * scale, h * scale);
+
+        canvas.toBlob((blob) => {
+          const pngUrl = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = pngUrl;
+          a.download = 'masar-diagram.png';
+          a.click();
+          URL.revokeObjectURL(pngUrl);
+        }, 'image/png');
+      };
+
+      img.onerror = () => {
+        console.warn('[DIAGRAM] PNG export failed — img load error');
+      };
+
+      img.crossOrigin = 'anonymous';
+      img.src = url;
+    } catch (err) {
+      console.warn('[DIAGRAM] PNG export failed:', err.message);
+    }
   };
 
   return (
@@ -81,7 +132,7 @@ export default function DiagramPanel({ diagramCode, loading }) {
             onMouseEnter={e => e.currentTarget.style.background = 'rgba(34,211,238,0.10)'}
             onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
           >
-            تحميل المخطط ↓
+            تحميل صورة المخطط ↓
           </button>
         )}
       </div>
