@@ -676,26 +676,31 @@ class SessionTitleRequest(BaseModel):
 
 @app.post("/session-title")
 async def session_title(req: SessionTitleRequest):
-    """Generate a short Arabic session title (≤5 words) using Claude Haiku."""
-    try:
-        message = await anthropic.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=30,
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"اعمل عنوان قصير جداً (أقصى 5 كلمات بالعربي) يلخص السؤال الهندسي ده. "
-                    f"ارجع العنوان بس من غير أي شرح.\n"
-                    f"السؤال: {req.first_question}"
-                ),
-            }],
-        )
-        title = message.content[0].text.strip()
-        logger.info("session-title generated: %r", title)
-        return {"title": title}
-    except Exception as e:
-        logger.error("session-title error: %s", e)
-        return {"title": req.service_id}
+    """Generate a short English session title (3-5 words, Title Case) using Claude Haiku."""
+    for attempt in range(2):
+        try:
+            message = await anthropic.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=30,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        f"Generate a short English title (3-5 words, Title Case) that describes this network engineering question. "
+                        f"Return ONLY the title — no quotes, no explanation, no period.\n"
+                        f"Examples: VLSM Subnet Planning, Fiber Link Budget, Voice QoS Design, SNMP Monitoring Setup\n"
+                        f"Question: {req.first_question}"
+                    ),
+                }],
+            )
+            title = message.content[0].text.strip().strip('"').strip("'")
+            logger.info("session-title generated: %r", title)
+            return {"title": title}
+        except Exception as e:
+            logger.warning("session-title attempt %d failed: %s", attempt + 1, e)
+            if attempt == 0:
+                await asyncio.sleep(3)
+    logger.error("session-title all attempts failed, falling back to service_id")
+    return {"title": req.service_id}
 
 
 # ── Network Diagram Generator ─────────────────────────────────────────────────

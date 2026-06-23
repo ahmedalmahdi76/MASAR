@@ -11,6 +11,8 @@ import DiagramPanel from '../components/DiagramPanel';
 import CalcSheetButton from '../components/CalcSheetButton';
 import CalcSheetPanel  from '../components/CalcSheetPanel';
 import FileUploadButton from '../components/FileUploadButton';
+import DiagramsDrawer from '../components/DiagramsDrawer';
+import CalcSheetsDrawer from '../components/CalcSheetsDrawer';
 import { exportSessionPDF } from '../utils/generatePDF';
 
 const TOUR_STEPS_WORKSPACE = [
@@ -144,6 +146,8 @@ export default function Workspace() {
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showText,    setShowText]    = useState(false);
+  const [showDiagramsDrawer, setShowDiagramsDrawer] = useState(false);
+  const [showCalcDrawer,     setShowCalcDrawer]      = useState(false);
   const [techLevel]      = useState(() => localStorage.getItem('masar_tech_level') ?? 'Professional');
   const [vadSensitivity] = useState(() => localStorage.getItem('masar_vad')        ?? 'medium');
   const [callActive, setCallActive] = useState(false);
@@ -208,6 +212,8 @@ export default function Workspace() {
   const [solvingIds,          setSolvingIds]          = useState({});
   const [conversationHistory, setConversationHistory] = useState([]);
   const historyAddedRef = useRef(new Set());
+  const turnIdMapRef = useRef({});
+  const turnInsertPromises = useRef({});
 
   const [diagrams,            setDiagrams]            = useState({});
   const [diagramLoading,      setDiagramLoading]      = useState({});
@@ -228,6 +234,20 @@ export default function Workspace() {
   const [attachedFile, setAttachedFile] = useState(null);
   const attachedFileRef = useRef(null);
   useEffect(() => { attachedFileRef.current = attachedFile; }, [attachedFile]);
+
+  const bargeInRef = useRef(true);
+  useEffect(() => {
+    const sync = () => {
+      bargeInRef.current = (localStorage.getItem('masar_bargein') ?? 'true') === 'true';
+    };
+    sync();
+    window.addEventListener('storage', sync);
+    window.addEventListener('focus', sync);
+    return () => {
+      window.removeEventListener('storage', sync);
+      window.removeEventListener('focus', sync);
+    };
+  }, []);
 
   const {
     ttsStates, play: playTTS, stop: stopTTS,
@@ -336,12 +356,12 @@ export default function Workspace() {
           assistant: solutions[t.id],
         }]);
         // Persist to Supabase — lazy session creation on first real turn
-        (async () => {
+        turnInsertPromises.current[t.id] = (async () => {
           const { data: { user } } = await supabase.auth.getUser();
-          if (!user) return;
+          if (!user) return null;
 
           if (!supabaseSessionIdRef.current) {
-            if (sessionCreatingRef.current) return;
+            if (sessionCreatingRef.current) return null;
             sessionCreatingRef.current = true;
             const { data: sessionData, error: sessionError } = await supabase
               .from('sessions')
@@ -353,11 +373,11 @@ export default function Workspace() {
               })
               .select()
               .single();
-            if (sessionError || !sessionData) return;
+            if (sessionError || !sessionData) return null;
             supabaseSessionIdRef.current = sessionData.id;
             setSupabaseSessionId(sessionData.id);
 
-            // Generate Arabic title from first question
+            // Generate title from first question
             try {
               const res = await fetch(
                 `${import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000'}/session-title`,
@@ -379,13 +399,18 @@ export default function Workspace() {
             }
           }
 
-          const { error } = await supabase.from('turns').insert({
+          const { data: insertedTurn, error } = await supabase.from('turns').insert({
             session_id:        supabaseSessionIdRef.current,
             arabic_transcript: t.text,
             refined_prompt:    masarResponses[t.id],
             solution:          solutions[t.id],
-          });
+          }).select('id').single();
           if (error) console.warn('[Supabase] turn insert failed:', error.message);
+          if (insertedTurn) {
+            turnIdMapRef.current[t.id] = insertedTurn.id;
+            return insertedTurn.id;
+          }
+          return null;
         })();
       }
     });
@@ -470,7 +495,7 @@ export default function Workspace() {
     let rafId;
     const detect = () => {
       const level = audioLevelRef.current ?? 0;
-      if (level > VAD_THRESHOLDS[vadSensitivity]) {
+      if (bargeInRef.current && level > VAD_THRESHOLDS[vadSensitivity]) {
         console.log('[BARGE-IN] detected, stopping TTS, level:', level);
         const activeTtsTurn = turns.find(t => ttsStates[t.id] && ttsStates[t.id] !== 'idle');
         if (activeTtsTurn) stopTTS(activeTtsTurn.id);
@@ -872,6 +897,8 @@ export default function Workspace() {
     sentenceAudioRef.current     = null;
     calcTriggeredRef.current     = new Set();
     calcPromptedRef.current      = new Set();
+    turnIdMapRef.current         = {};
+    turnInsertPromises.current   = {};
     setAttachedFile(null);
     await fetchSessions();
   }
@@ -965,7 +992,23 @@ export default function Workspace() {
       const data = await res.json();
       console.log('[DIAGRAM] response data:', data);
       const { diagram } = data;
-      if (diagram) setDiagrams(prev => ({ ...prev, [turnId]: diagram }));
+      if (diagram) {
+        setDiagrams(prev => ({ ...prev, [turnId]: diagram }));
+        const promise = turnInsertPromises.current[turnId];
+        if (promise) {
+          promise.then(sbId => {
+            console.log('[DIAGRAM] resolved sbId:', sbId);
+            if (!sbId) { console.warn('[DIAGRAM] no sbId — save skipped'); return; }
+            supabase.from('turns').update({ diagram_mermaid: diagram })
+              .eq('id', sbId).then(({ error: e }) => {
+                if (e) console.warn('[DIAGRAM] save failed:', e.message);
+                else console.log('[DIAGRAM] saved to Supabase, turnId:', sbId);
+              });
+          });
+        } else {
+          console.warn('[DIAGRAM] no insert promise for turnId:', turnId);
+        }
+      }
     } catch (e) {
       console.error('Diagram fetch failed:', e);
     } finally {
@@ -1010,6 +1053,20 @@ export default function Workspace() {
       console.log('[CALC] fetchCalcSheet returning:', !!data.sections);
       if (data.sections) {
         setCalcSheets(prev => ({ ...prev, [turnId]: data }));
+        const promise = turnInsertPromises.current[turnId];
+        if (promise) {
+          promise.then(sbId => {
+            console.log('[CALC] resolved sbId:', sbId);
+            if (!sbId) { console.warn('[CALC] no sbId — save skipped'); return; }
+            supabase.from('turns').update({ calc_json: data })
+              .eq('id', sbId).then(({ error: e }) => {
+                if (e) console.warn('[CALC] save failed:', e.message);
+                else console.log('[CALC] saved to Supabase, turnId:', sbId);
+              });
+          });
+        } else {
+          console.warn('[CALC] no insert promise for turnId:', turnId);
+        }
         return true;
       }
     } catch (e) {
@@ -1202,6 +1259,11 @@ export default function Workspace() {
             />
           </div>
 
+          <div style={{ padding: '0 0.75rem 0.5rem', display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+            <SidebarRow icon="◈" label="المخططات" onClick={() => { setSidebarOpen(false); setShowDiagramsDrawer(true); }} />
+            <SidebarRow icon="▦" label="جداول الحسابات" onClick={() => { setSidebarOpen(false); setShowCalcDrawer(true); }} />
+          </div>
+
           <div style={{ flex: 1, overflowY: 'auto', padding: '0 0.75rem' }}>
             <p className="mono-sm" style={{ color: 'var(--masar-muted)', padding: '0.5rem 0.25rem' }}>
               Previous Sessions
@@ -1228,8 +1290,8 @@ export default function Workspace() {
                     onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
                   >
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <p style={{ fontSize: '0.8125rem', color: '#CBD5E1', marginBottom: '0.125rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontFamily: 'Cairo, sans-serif', direction: 'rtl' }}>
-                        {s.title ?? s.service_id ?? 'جلسة'}
+                      <p style={{ fontSize: '0.8125rem', color: '#CBD5E1', marginBottom: '0.125rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontFamily: 'var(--font-mono)', direction: 'ltr', textAlign: 'left' }}>
+                        {s.title ?? s.service_id ?? 'Session'}
                       </p>
                       <p className="mono-sm" style={{ color: 'var(--masar-muted)', fontFamily: 'Cairo, sans-serif', direction: 'rtl', textAlign: 'right' }}>
                         {new Date(s.started_at).toLocaleDateString('ar-EG')}
@@ -1300,9 +1362,7 @@ export default function Workspace() {
             )}
           </div>
 
-          <div style={{ padding: '0.75rem', borderTop: '1px solid var(--masar-border)' }}>
-            <SidebarRow icon="⚙" label="Settings" onClick={() => navigate('/settings')} />
-          </div>
+          <div style={{ padding: '0.75rem', borderTop: '1px solid var(--masar-border)' }} />
 
         </div>
       </aside>
@@ -1487,6 +1547,9 @@ export default function Workspace() {
           turnId={pendingCalcTurnId}
         />
       )}
+
+      <DiagramsDrawer open={showDiagramsDrawer} onClose={() => setShowDiagramsDrawer(false)} />
+      <CalcSheetsDrawer open={showCalcDrawer} onClose={() => setShowCalcDrawer(false)} />
 
     </div>
   );

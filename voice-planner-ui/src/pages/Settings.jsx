@@ -25,6 +25,7 @@ export default function Settings() {
   const navigate = useNavigate();
   const [vad,  setVad]  = useState(() => localStorage.getItem('masar_vad')        ?? 'medium');
   const [tech, setTech] = useState(() => localStorage.getItem('masar_tech_level') ?? 'Professional');
+  const [bargeIn, setBargeIn] = useState(() => (localStorage.getItem('masar_bargein') ?? 'true') === 'true');
 
   // Account
   const [user,          setUser]          = useState(undefined);
@@ -48,6 +49,7 @@ export default function Settings() {
 
   const saveVad  = v => { setVad(v);  localStorage.setItem('masar_vad', v); };
   const saveTech = v => { setTech(v); localStorage.setItem('masar_tech_level', v); };
+  const saveBargeIn = v => { setBargeIn(v); localStorage.setItem('masar_bargein', String(v)); };
 
   const handleChangePassword = async () => {
     setPwMsg('');
@@ -132,6 +134,42 @@ export default function Settings() {
             {TECH_OPTIONS.map(o => (
               <button key={o.value} onClick={() => saveTech(o.value)} style={optionStyle(tech === o.value)}>{o.ar}</button>
             ))}
+          </div>
+        </section>
+
+        {/* Barge-in */}
+        <section className="settings-section" style={{ marginBottom: '2.5rem' }}>
+          <p style={arLabel}>المقاطعة أثناء الكلام</p>
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            background: 'var(--masar-surface)', border: '1px solid var(--masar-border)',
+            borderRadius: 'var(--radius-md)', padding: '0.75rem 1rem',
+          }}>
+            <label style={{
+              position: 'relative', display: 'inline-block',
+              width: 44, height: 24, flexShrink: 0, cursor: 'pointer',
+            }}>
+              <input type="checkbox" checked={bargeIn} onChange={e => saveBargeIn(e.target.checked)}
+                style={{ opacity: 0, width: 0, height: 0 }} />
+              <span style={{
+                position: 'absolute', inset: 0, borderRadius: 12,
+                background: bargeIn ? 'rgba(245,158,11,0.5)' : 'rgba(100,116,139,0.3)',
+                transition: 'background 200ms',
+              }} />
+              <span style={{
+                position: 'absolute', top: 2, left: bargeIn ? 22 : 2,
+                width: 20, height: 20, borderRadius: '50%',
+                background: bargeIn ? '#F59E0B' : '#64748B',
+                transition: 'left 200ms, background 200ms',
+              }} />
+            </label>
+            <p style={{
+              fontFamily: 'Cairo, sans-serif', fontSize: '0.8125rem',
+              color: 'var(--masar-muted)', direction: 'rtl', textAlign: 'right',
+              margin: 0, flex: 1, paddingRight: '0.75rem',
+            }}>
+              لو مفعّل، تقدر تقاطع مسار وهو بيتكلم بإنك تتكلم. لو مقفول، مسار هيكمل كلامه لحد ما يخلص.
+            </p>
           </div>
         </section>
 
