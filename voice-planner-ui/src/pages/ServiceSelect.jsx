@@ -36,32 +36,56 @@ const TOUR_STEPS_SERVICES = [
 /*
  * STAGE 3 — Service Selection (Bento Grid v2)
  *
- * Grid blueprint (6-column × 3-row system):
+ * Grid blueprint (4-column × 2-row system):
  *
- *  ┌──────────────────┬───────────┬───────────┐
- *  │  Fiber Optic     │  Topology │  IP Scheme│  ROW 1
- *  │  (col 1-4)       │  (col 4-6)│  (col 6-7)│
- *  ├───────────┬──────┴─────┬─────┴───────────┤
- *  │  Monitoring│  Capacity  │  Redundancy    │  ROW 2
- *  │  (col 1-3) │  (col 3-5) │  (col 5-7)     │
- *  ├────────────┴─────┬──────┴─────────────────┤
- *  │  Security        │  QoS     │  General    │  ROW 3
- *  │  (col 1-3)       │  (col 3-5)│  (col 5-7) │
- *  └──────────────────┴──────────┴─────────────┘
+ *  ┌──────────┬──────────┬──────────┬──────────┐
+ *  │  Mobile  │ Antenna  │  Fiber   │    IP    │  ROW 1
+ *  ├──────────┼──────────┼──────────┼──────────┤
+ *  │ Capacity │   QoS    │ Infra    │ General  │  ROW 2
+ *  └──────────┴──────────┴──────────┴──────────┘
  */
 
 const SERVICES = [
   /* ── ROW 1 ── */
   {
+    id: 'mobile',
+    col: '1 / 2', row: '1 / 2',
+    label: 'Mobile Communications',
+    arabic: 'الاتصالات المتنقلة',
+    desc: '4G LTE, 5G NR, RAN planning, cell capacity & coverage, handover, network slicing.',
+    accent: '#F59E0B',
+    icon: '📡',
+    large: false,
+    cardBg: [
+      'radial-gradient(ellipse 70% 80% at 80% 20%, rgba(245,158,11,0.13) 0%, transparent 55%)',
+      'repeating-linear-gradient(45deg, transparent 0px, transparent 18px, rgba(245,158,11,0.03) 18px, rgba(245,158,11,0.03) 19px)',
+      'var(--masar-surface)',
+    ].join(', '),
+  },
+  {
+    id: 'antenna_rf',
+    col: '2 / 3', row: '1 / 2',
+    label: 'Antennas & RF',
+    arabic: 'الهوائيات والـ RF',
+    desc: 'Antenna design, gain, MIMO, propagation models, RF link budget, EIRP.',
+    accent: '#EF4444',
+    icon: '⚆',
+    large: false,
+    cardBg: [
+      'radial-gradient(circle at 50% 50%, transparent 28%, rgba(239,68,68,0.06) 29%, transparent 31%, transparent 52%, rgba(239,68,68,0.04) 53%, transparent 55%)',
+      'radial-gradient(ellipse at 50% 50%, rgba(239,68,68,0.10) 0%, transparent 65%)',
+      'var(--masar-surface)',
+    ].join(', '),
+  },
+  {
     id: 'fiber',
-    col: '1 / 4', row: '1 / 2',
-    label: 'Fiber Optic Routing',
-    arabic: 'توجيه الألياف الضوئية',
-    desc: 'Design backbone fiber routes with OSNR budgets and splicing intervals.',
+    col: '3 / 4', row: '1 / 2',
+    label: 'Fiber Optics',
+    arabic: 'الألياف الضوئية',
+    desc: 'Backbone routes, OSNR, loss budget, splicing, OTN/DWDM.',
     accent: '#F59E0B',
     icon: '◈',
-    large: true,
-    // Diagonal traces (optical fibers) + amber bloom at exit point (top-right)
+    large: false,
     cardBg: [
       'radial-gradient(ellipse 70% 80% at 95% 0%, rgba(245,158,11,0.13) 0%, transparent 55%)',
       'repeating-linear-gradient(135deg, transparent 0px, transparent 18px, rgba(245,158,11,0.035) 18px, rgba(245,158,11,0.035) 19px)',
@@ -69,33 +93,14 @@ const SERVICES = [
     ].join(', '),
   },
   {
-    id: 'topology',
-    col: '4 / 6', row: '1 / 2',
-    label: 'Network Topology',
-    arabic: 'طبولوجيا الشبكة',
-    desc: 'Ring, mesh, and star topology generation.',
-    accent: '#22D3EE',
-    icon: '⬡',
-    large: false,
-    // Grid-dot matrix (nodes) + cyan center glow
-    cardBg: [
-      'radial-gradient(circle at 65% 35%, rgba(34,211,238,0.11) 0%, transparent 55%)',
-      'repeating-linear-gradient(0deg,   transparent 0, transparent 14px, rgba(34,211,238,0.04) 14px, rgba(34,211,238,0.04) 15px)',
-      'repeating-linear-gradient(90deg,  transparent 0, transparent 14px, rgba(34,211,238,0.04) 14px, rgba(34,211,238,0.04) 15px)',
-      'var(--masar-surface)',
-    ].join(', '),
-  },
-  {
     id: 'ip',
-    col: '6 / 7', row: '1 / 2',
-    label: 'IP Scheme',
-    arabic: 'مخطط IP',
-    desc: 'VLSM, subnetting, and addressing plans.',
+    col: '4 / 5', row: '1 / 2',
+    label: 'IP & Subnetting',
+    arabic: 'عنونة الـ IP',
+    desc: 'VLSM, CIDR, IPv4/IPv6, routing protocols, addressing plans.',
     accent: '#10B981',
     icon: '⊞',
     large: false,
-    compact: true,
-    // Address columns (vertical grid) + green corner bloom
     cardBg: [
       'radial-gradient(ellipse at 100% 100%, rgba(16,185,129,0.13) 0%, transparent 55%)',
       'repeating-linear-gradient(90deg, transparent 0, transparent 8px, rgba(16,185,129,0.045) 8px, rgba(16,185,129,0.045) 9px)',
@@ -105,31 +110,14 @@ const SERVICES = [
 
   /* ── ROW 2 ── */
   {
-    id: 'monitoring',
-    col: '1 / 3', row: '2 / 3',
-    label: 'Network Monitoring',
-    arabic: 'مراقبة الشبكة',
-    desc: 'SNMP, NetFlow, and real-time alerting schemas.',
-    accent: '#F59E0B',
-    icon: '◎',
-    large: false,
-    // Radar pulse rings + amber center glow
-    cardBg: [
-      'radial-gradient(circle at 50% 50%, transparent 28%, rgba(245,158,11,0.06) 29%, transparent 31%, transparent 52%, rgba(245,158,11,0.04) 53%, transparent 55%)',
-      'radial-gradient(ellipse at 50% 50%, rgba(245,158,11,0.10) 0%, transparent 65%)',
-      'var(--masar-surface)',
-    ].join(', '),
-  },
-  {
     id: 'capacity',
-    col: '3 / 5', row: '2 / 3',
+    col: '1 / 2', row: '2 / 3',
     label: 'Capacity Planning',
     arabic: 'تخطيط السعة',
-    desc: 'Bandwidth estimation and growth projection.',
+    desc: 'Bandwidth estimation, traffic growth, throughput, Erlang models.',
     accent: '#22D3EE',
     icon: '◱',
     large: false,
-    // Rising vertical bars (bandwidth chart) + top-fade gradient
     cardBg: [
       'linear-gradient(180deg, var(--masar-surface) 0%, rgba(34,211,238,0.055) 100%)',
       'repeating-linear-gradient(90deg, transparent 0, transparent 10px, rgba(34,211,238,0.04) 10px, rgba(34,211,238,0.04) 11px)',
@@ -137,50 +125,14 @@ const SERVICES = [
     ].join(', '),
   },
   {
-    id: 'redundancy',
-    col: '5 / 7', row: '2 / 3',
-    label: 'Redundancy Design',
-    arabic: 'تصميم التكرار',
-    desc: 'Failover paths, hot standby, and STP planning.',
-    accent: '#A78BFA',
-    icon: '⇄',
-    large: false,
-    // Crosshatch (dual redundant paths) + violet top glow
-    cardBg: [
-      'radial-gradient(ellipse at 50% 0%, rgba(167,139,250,0.12) 0%, transparent 55%)',
-      'repeating-linear-gradient( 45deg, transparent 0, transparent 14px, rgba(167,139,250,0.03) 14px, rgba(167,139,250,0.03) 15px)',
-      'repeating-linear-gradient(-45deg, transparent 0, transparent 14px, rgba(167,139,250,0.03) 14px, rgba(167,139,250,0.03) 15px)',
-      'var(--masar-surface)',
-    ].join(', '),
-  },
-
-  /* ── ROW 3 ── */
-  {
-    id: 'security',
-    col: '1 / 3', row: '3 / 4',
-    label: 'Network Security',
-    arabic: 'أمن الشبكة',
-    desc: 'Firewall zoning, ACLs, and DMZ architecture.',
-    accent: '#EF4444',
-    icon: '⬡',
-    large: false,
-    // Diagonal hatching (ACL chains) + red corner ember
-    cardBg: [
-      'radial-gradient(circle at 15% 85%, rgba(239,68,68,0.13) 0%, transparent 50%)',
-      'repeating-linear-gradient(45deg, transparent 0, transparent 9px, rgba(239,68,68,0.035) 9px, rgba(239,68,68,0.035) 10px)',
-      'var(--masar-surface)',
-    ].join(', '),
-  },
-  {
     id: 'qos',
-    col: '3 / 5', row: '3 / 4',
+    col: '2 / 3', row: '2 / 3',
     label: 'QoS Design',
     arabic: 'جودة الخدمة',
-    desc: 'Traffic shaping, DSCP marking, and priority queuing.',
+    desc: 'Traffic shaping, DSCP marking, priority queuing, latency/jitter.',
     accent: '#10B981',
     icon: '≋',
     large: false,
-    // Horizontal priority bands (traffic lanes) + green bottom bloom
     cardBg: [
       'radial-gradient(ellipse at 50% 110%, rgba(16,185,129,0.11) 0%, transparent 55%)',
       'repeating-linear-gradient(0deg, transparent 0, transparent 5px, rgba(16,185,129,0.035) 5px, rgba(16,185,129,0.035) 6px)',
@@ -188,15 +140,30 @@ const SERVICES = [
     ].join(', '),
   },
   {
+    id: 'infrastructure',
+    col: '3 / 4', row: '2 / 3',
+    label: 'Network Infrastructure',
+    arabic: 'البنية التحتية',
+    desc: 'Topology, redundancy & HA, monitoring (SNMP/NetFlow), security & firewalls.',
+    accent: '#A78BFA',
+    icon: '⬡',
+    large: false,
+    cardBg: [
+      'radial-gradient(ellipse at 50% 0%, rgba(167,139,250,0.12) 0%, transparent 55%)',
+      'repeating-linear-gradient( 45deg, transparent 0, transparent 14px, rgba(167,139,250,0.03) 14px, rgba(167,139,250,0.03) 15px)',
+      'repeating-linear-gradient(-45deg, transparent 0, transparent 14px, rgba(167,139,250,0.03) 14px, rgba(167,139,250,0.03) 15px)',
+      'var(--masar-surface)',
+    ].join(', '),
+  },
+  {
     id: 'general',
-    col: '5 / 7', row: '3 / 4',
-    label: 'General Conversation',
-    arabic: 'محادثة عامة',
-    desc: 'Free-form discussion on any engineering topic without a specific task.',
+    col: '4 / 5', row: '2 / 3',
+    label: 'General Guide',
+    arabic: 'المرشد العام',
+    desc: 'Not sure where to start? I\'ll help you find the right specialist domain.',
     accent: '#6366F1',
     icon: '⊙',
     large: false,
-    // Soft dual-tone organic glow — open-ended, no hard pattern
     cardBg: [
       'radial-gradient(ellipse 75% 65% at 25% 70%, rgba(99,102,241,0.13) 0%, transparent 60%)',
       'radial-gradient(ellipse 50% 50% at 85% 20%, rgba(139,92,246,0.08) 0%, transparent 55%)',
@@ -433,8 +400,8 @@ export default function ServiceSelect() {
           className="bento-grid page-enter"
           style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(6, 1fr)',
-            gridTemplateRows: 'repeat(3, 1fr)',
+            gridTemplateColumns: 'repeat(4, 1fr)',
+            gridTemplateRows: 'repeat(2, 1fr)',
             gap: '0.75rem',
             height: '100%',
           }}

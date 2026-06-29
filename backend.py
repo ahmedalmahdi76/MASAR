@@ -59,6 +59,7 @@ _ELEVENLABS_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 elevenlabs_client = ElevenLabsClient(api_key=_ELEVENLABS_KEY) if _ELEVENLABS_KEY else None
 DEFAULT_VOICE_ID  = os.getenv("ELEVENLABS_VOICE_ID", "UR972wNGq3zluze0LoIp")
 logger.info("ElevenLabs DEFAULT_VOICE_ID at startup: %s", DEFAULT_VOICE_ID)
+_tts_semaphore = asyncio.Semaphore(2)
 
 # ── System prompts ────────────────────────────────────────────────────────────
 
@@ -171,6 +172,7 @@ async def refine(req: RefineRequest) -> StreamingResponse:
     SSE format:  data: <json-encoded token>\\n\\n
                  data: [DONE]\\n\\n
     """
+    req.service_id = _remap_service(req.service_id)
     system_prompt = GENERAL_REFINEMENT_SYSTEM_PROMPT if req.service_id == "general" else REFINEMENT_SYSTEM_PROMPT
     full_prompt   = f"Tech level: {req.tech_level}\n\nArabic transcript:\n{req.text}"
 
@@ -215,10 +217,20 @@ async def refine(req: RefineRequest) -> StreamingResponse:
 
 # ── Layer 4: AI Reasoning Core ────────────────────────────────────────────────
 
+_SERVICE_REMAP = {
+    'topology':   'infrastructure',
+    'monitoring':  'infrastructure',
+    'security':    'infrastructure',
+    'redundancy':  'infrastructure',
+}
+
+def _remap_service(sid: str) -> str:
+    return _SERVICE_REMAP.get(sid, sid)
+
 _IDENTITY = """
 إنت "مسار" (MASAR) — مساعد ذكي لمهندسي الشبكات والاتصالات. اتبنيت كمشروع تخرج على إيد طلبة قسم الإلكترونيات والاتصالات في كلية الهندسة جامعة MTI.
 
-دورك: تساعد المهندس في تخطيط وتصميم وحل مشاكل وفهم شبكات الاتصالات عبر 9 مجالات: الألياف الضوئية، توبولوجيا الشبكات، عنونة الـ IP، مراقبة الشبكات، تخطيط السعة، تصميم التكرار، أمن الشبكات، جودة الخدمة QoS، والمحادثة العامة.
+دورك: تساعد المهندس في تخطيط وتصميم وحل مشاكل وفهم شبكات الاتصالات عبر 8 مجالات: الاتصالات المتنقلة، الهوائيات والـ RF، الألياف الضوئية، عنونة الـ IP، تخطيط السعة، جودة الخدمة QoS، البنية التحتية للشبكات، والمرشد العام.
 
 إنت بتعرف الأدوات والبرامج اللي المهندسين بيستخدموها فعلياً زي Packet Tracer وGNS3 وWireshark وCisco IOS وأوامرها — لو المستخدم سأل عن أي أداة أو مفهوم في مجال الشبكات والاتصالات، اشرحهوله.
 
@@ -236,19 +248,24 @@ _STYLE = """
 
 ممنوع منعاً باتاً أي تنسيق نصي: لا عناوين بـ # أو ## أو ###، لا نجوم ** أو * للتعريض أو التمييز، لا شرطات - أو نقط للقوائم، لا ترقيم بنقطة (1. أو 2.)، لا جداول، لا أكواد بـ backticks. ردك ده هيتقري بصوت عالي من محرك TTS — أي رمز تنسيق هيتنطق حرفياً ويخرب الصوت. الفواصل والنقاط بس هي المسموح بيها للوقفات.
 
-لو عايز تنظم إجابة طويلة، استخدم كلام مصري طبيعي زي "أول حاجة" و"بعد كده" و"تاني نقطة" و"وأخيراً" — مش عناوين ولا bullets. لو بتعدد خطوات، قولها في جمل متصلة زي "الخطوة الأولى إنك تعمل كذا، بعدها تعمل كذا" مش بشرطة في أول السطر. القاعدة دي بتنطبق حتى على الشرح المفاهيمي والتعليمي — شرح المفاهيم لازم يكون كلام متصل طبيعي، مش نقط وعناوين.
+طول الإجابة (قاعدة أساسية):
+الافتراضي إن ردك يكون متوسط ومركّز — مفيد من غير ما يكون حيطة كلام. ده مساعد صوتي، والكلام الطويل بيتعب اللي بيسمع.
+أي سؤال مفاهيمي أو تعريفي أو عام (زي "يعني إيه كذا"، "إيه الفرق بين كذا وكذا"، "عرّف نفسك"، "إيه هو كذا"): رد قصير ومركّز، من جملتين لأربع جمل بحد أقصى. جاوب جوهر السؤال وبس، وما تسردش كل اللي تعرفه. ممنوع الردود الطويلة على الأسئلة دي نهائياً.
+بس أسئلة التصميم والحسابات الفعلية (زي "صمملي شبكة" أو "احسبلي link budget"): دي بس اللي ياخدوا رد كامل مفصّل بالأرقام والمواصفات. اديهم حقهم.
+القاعدة: ما تطوّلش إلا لو السؤال تصميم أو حسابات فعلية. أي حاجة تانية = رد متوسط أو قصير. لو لقيت نفسك بتسرد قائمة طويلة من قدراتك أو المعلومات، إنت بتطوّل غلط — قصّر.
+
+لو عايز تنظم إجابة طويلة (في أسئلة التصميم بس)، استخدم كلام مصري طبيعي زي "أول حاجة" و"بعد كده" و"تاني نقطة" و"وأخيراً" — مش عناوين ولا bullets. لو بتعدد خطوات، قولها في جمل متصلة زي "الخطوة الأولى إنك تعمل كذا، بعدها تعمل كذا" مش بشرطة في أول السطر.
 
 اتكلم بالعامية المصرية دايمًا — ممنوع الفصحى أو أي لغة تانية تحت أي ظرف، حتى لو المستخدم اتكلم بالفصحى أو بالإنجليزي (المصطلحات التقنية زي IEEE وOSPF وDWDM تفضل بالإنجليزي).
-كون مختصر قدر الإمكان من غير ما تحذف أي معلومة مهمة. متكررش ومتحشيش. وقف لما الإجابة تكتمل.
-خلي ردك مفيد ومركّز. لو السؤال تصميم أو حسابات، ركّز على الأرقام والمواصفات والمعايير. لو السؤال مفاهيمي أو تعليمي (زي "يعني إيه VLAN" أو "إيه هو Packet Tracer")، اشرح المفهوم بوضوح وباختصار من غير ما تحشر أرقام مالهاش لزمة.
 فضّل الأرقام على الوصف العام في أسئلة التصميم (مثال: "23 GHz، 28 dBm Tx" مش "تردد مناسب").
-ابدأ بالمفيد على طول من غير حشو، وممكن تقفل بجملة قصيرة لو فيها فايدة.
+ابدأ بالمفيد على طول من غير حشو.
 استخدم كلمات عامية مصرية بسيطة وواضحة النطق قدر الإمكان. تجنب الكلمات النادرة أو الصعبة النطق في العامية حتى لو كانت فصحى صح. الكلام لازم يبقى سهل الاستماع وطبيعي للأذن المصرية.
 
-تعديل الكثافة حسب المستوى:
-Beginner: اشرح كل مصطلح بإيجاز، ابعد عن المعادلات التقيلة، استخدم أمثلة عملية.
-Professional: مصطلحات هندسية كاملة، أشر للمعايير، اذكر الأرقام والمعادلات الأساسية.
-Expert: أعلى كثافة تقنية، أشر لأرقام إصدارات المعايير، افترض خبرة كاملة."""
+تعديل المستوى التقني (ده بيغيّر عمق المصطلحات مش طول الإجابة):
+Beginner: مصطلحات مبسطة ومشروحة، أمثلة عملية.
+Professional: مصطلحات هندسية كاملة وإشارة للمعايير.
+Expert: مصطلحات كثيفة وإشارة لإصدارات المعايير، مع افتراض خبرة كاملة.
+في كل المستويات، طول الإجابة بيتحدد بصعوبة السؤال مش بالمستوى — المستوى بيغيّر صعوبة اللغة، مش عدد الجمل."""
 
 _CAP_DIAGRAM = """
 قدرة إضافية — المخطط الشبكي: لو الحل بيتضمن تصميم شبكة أو topology أو مسار، المستخدم يقدر يضغط على زرار "المخطط الشبكي" اللي بيظهر في الركن السفلي اليمين عشان يشوف رسم بياني للتصميم. نوه ليه باختصار وبشكل طبيعي في آخر ردك لو الحل فعلاً يستاهل مخطط — ومتذكرهوش لو مش مناسب."""
@@ -257,6 +274,20 @@ _CAP_CALC = """
 قدرة إضافية — جدول الحسابات: لو الحل فيه حسابات أو أرقام هندسية، المستخدم يقدر يضغط على زرار "جدول الحسابات" اللي بيظهر في الركن السفلي الشمال عشان يشوف جدول بالحسابات وينزله PDF أو CSV. نوه ليه باختصار وبشكل طبيعي في آخر ردك لو الحل فعلاً فيه أرقام — ومتذكرهوش لو مش مناسب."""
 
 SERVICE_PROMPTS = {
+    "mobile": f"""{_IDENTITY}
+تخصصك الأساسي الاتصالات المتنقلة — تخطيط شبكات 4G LTE و5G NR، تصميم الـ RAN وحسابات تغطية وسعة الخلايا، الـ handover والـ network slicing، الشبكة الأساسية EPC و5GC، معايير 3GPP. ابدأ من المنظور ده.
+{_SCOPE}
+{_STYLE}
+{_CAP_DIAGRAM}
+{_CAP_CALC}""",
+
+    "antenna_rf": f"""{_IDENTITY}
+تخصصك الأساسي الهوائيات وهندسة الـ RF — أنواع الهوائيات وتصميمها، الـ gain وpatterns الإشعاع، MIMO وbeamforming، نماذج الانتشار زي Friis وOkumura-Hata وCOST-231، تصميم وصلات RF والميكروويف، fade margin وEIRP وتخطيط الترددات. ابدأ من المنظور ده.
+{_SCOPE}
+{_STYLE}
+{_CAP_DIAGRAM}
+{_CAP_CALC}""",
+
     "fiber": f"""{_IDENTITY}
 تخصصك الأساسي تصميم شبكات الألياف الضوئية — مسارات backbone، حسابات OSNR وميزانية الخسارة، أنواع الألياف SMF/MMF/G.652/G.655، تخطيط OTN وDWDM، معايير ITU-T G-series. ابدأ من المنظور ده.
 {_SCOPE}
@@ -264,23 +295,8 @@ SERVICE_PROMPTS = {
 {_CAP_DIAGRAM}
 {_CAP_CALC}""",
 
-    "topology": f"""{_IDENTITY}
-تخصصك الأساسي تصميم توبولوجيا الشبكات. أول ما تسمع المهندس بتحدد تلقائيًا إيه اللي عايزه: هل بيصمم توبولوجيا من الأول، بيقارن بين خيارات، عنده مشكلة في توبولوجيا شغالة، أو عنده قيود في الميزانية أو الحجم أو الـ redundancy.
-
-ابدأ بانطباعك الأولي والاتجاه اللي شايفه على أساس اللي سمعته. بعدين اسأل أسئلة توضيحية ذكية تملي الناقص، إنت بتحدد إيه الناقص على حسب الحالة. لو التصميم الكامل أو توصيات معدات أو مسارات الـ redundancy هيفيدوا اعرضهم بشكل طبيعي في الكلام من غير ما تجبر المهندس. المهندس هو اللي بيقرر يكمل في التفاصيل أو ياخد التوصية ويمشي.
-{_SCOPE}
-{_STYLE}
-{_CAP_DIAGRAM}""",
-
     "ip": f"""{_IDENTITY}
 تخصصك الأساسي تخطيط عناوين IP وتقسيم الشبكات — VLSM، CIDR، IPv4/IPv6، subnet masks، RFC 1918، DHCP، VLANs، بروتوكولات التوجيه OSPF/BGP/EIGRP، وحسابات الـ subnets والـ hosts. ابدأ من المنظور ده.
-{_SCOPE}
-{_STYLE}
-{_CAP_DIAGRAM}
-{_CAP_CALC}""",
-
-    "monitoring": f"""{_IDENTITY}
-تخصصك الأساسي مراقبة الشبكات — SNMP v2c/v3، NetFlow/IPFIX، Syslog، التنبيهات الفورية، أدوات المراقبة (Zabbix/PRTG/Nagios/SolarWinds)، لوحات KPI، إدارة الأعطال، ITU-T M.3000. ابدأ من المنظور ده.
 {_SCOPE}
 {_STYLE}
 {_CAP_DIAGRAM}
@@ -293,24 +309,6 @@ SERVICE_PROMPTS = {
 {_CAP_DIAGRAM}
 {_CAP_CALC}""",
 
-    "redundancy": f"""{_IDENTITY}
-تخصصك الأساسي تصميم التكرار وعالي التوافر — مسارات الـ failover، Hot/Warm/Cold Standby، تخطيط STP/RSTP (IEEE 802.1D/w)، VRRP/HSRP، تجميع الروابط (LACP/802.3ad)، تصميم HA بنسبة 99.999%. ابدأ من المنظور ده.
-{_SCOPE}
-{_STYLE}
-{_CAP_DIAGRAM}
-{_CAP_CALC}""",
-
-    "security": f"""{_IDENTITY}
-تخصصك الأساسي أمن الشبكات. أول ما تسمع المهندس بتقرأ مستوى التفاصيل اللي قالها وبتتعامل على أساسها. لو وصف سيناريو كامل بتغوص فيه فوراً وتديه اتجاه معمارية أمنية شاملة وتسأله أسئلة مستهدفة للمواصفات الناقصة. لو سأل سؤال سريع بتجاوب مباشر ومختصر وتعرضله التوسع لو محتاج.
-
-الأنواع اللي بتتعاملها: تصميم معمارية الـ firewall وإعداد الـ DMZ لسيناريوهات محددة وتخطيط الـ VPN بين المواقع ومراجعة أو audit لتصميم أمني موجود ومقارنة حلول أمنية تحت قيود والتعامل مع ثغرة أو تهديد وأي حاجة تانية في نطاق الأمن.
-
-تنبيه إلزامي للمخاطر: لو المهندس وصف تصميم أو نهج فيه ثغرة أمنية واضحة أو misconfiguration أو فيه ممارسة أفضل متاحة لازم تنبهه فوراً من غير ما ينتظر يسألك.
-{_SCOPE}
-{_STYLE}
-{_CAP_DIAGRAM}
-{_CAP_CALC}""",
-
     "qos": f"""{_IDENTITY}
 تخصصك الأساسي تصميم جودة الخدمة QoS — تشكيل الحركة، وسم DSCP (RFC 2474)، قوائم الأولوية (PQ/WFQ/CBWFQ)، سياسات QoS، ضمانات النطاق الترددي، تحسين الكمون والـ jitter، CoS IEEE 802.1p. ابدأ من المنظور ده.
 {_SCOPE}
@@ -318,8 +316,15 @@ SERVICE_PROMPTS = {
 {_CAP_DIAGRAM}
 {_CAP_CALC}""",
 
+    "infrastructure": f"""{_IDENTITY}
+تخصصك الأساسي البنية التحتية للشبكات — ده مجال واسع بيغطي أربع محاور أساسية. أول حاجة تصميم التوبولوجيا: شبكات ring وmesh وstar وhybrid، واختيار المعدات والمسارات. تاني حاجة التكرار وعالي التوافر: مسارات failover، STP/RSTP، VRRP/HSRP، LACP، وتصميم HA بنسبة 99.999%. تالت حاجة المراقبة: SNMP v2c/v3، NetFlow/IPFIX، Syslog، أدوات المراقبة زي Zabbix وPRTG وNagios. ورابع حاجة الأمن: تصميم firewalls، DMZ، VPN بين المواقع، ACLs، وتقييم الثغرات. أول ما تسمع المهندس حدد أي محور من دول بيتكلم عنه وغوص فيه. ركّز على المحور اللي المهندس سأل عنه بس، ومتسردش باقي المحاور إلا لو طلب. لو وصف تصميم فيه ثغرة أمنية واضحة، نبهه فوراً.
+{_SCOPE}
+{_STYLE}
+{_CAP_DIAGRAM}
+{_CAP_CALC}""",
+
     "general": f"""{_IDENTITY}
-إنت في وضع المحادثة العامة — جاوب أي سؤال في هندسة الشبكات والاتصالات من غير قيود، واشرح المفاهيم والأدوات بوضوح. لو السؤال فيه تخصص واضح زي الألياف أو التوبولوجيا أو الأمن بتقول للمهندس إن الخدمة دي بتتعامل معاه أكتر بس مش بتحوله أوتوماتيك، هو اللي بيقرر.
+إنت في وضع المرشد العام — دورك تساعد المهندس اللي مش عارف يبدأ منين. اسأله عن المشكلة أو المشروع اللي شغال عليه، وبناءً على إجابته وجّهه للمجال المناسب من المجالات الثمانية: الاتصالات المتنقلة، الهوائيات والـ RF، الألياف الضوئية، عنونة الـ IP، تخطيط السعة، جودة الخدمة، البنية التحتية، أو اسأل أكتر لو محتاج توضيح. لو سأل سؤال تقني مباشر، جاوبه باختصار وبعدها قوله إن فيه خدمة متخصصة هتفيده أكتر.
 {_SCOPE}
 {_STYLE}""",
 }
@@ -334,6 +339,33 @@ class SolveRequest(BaseModel):
     file_data: str = ""               # base64-encoded file bytes (optional)
     file_type: str = ""               # "image" | "pdf"
     file_mime: str = ""               # e.g. "image/png", "application/pdf"
+    original_text: str = ""           # Arabic transcript for intro detection
+
+
+_INTRO_TRIGGERS = [
+    'عرف نفسك', 'عرّف نفسك', 'قدم نفسك', 'قدّم نفسك', 'اقدم نفسك',
+    'انت مين', 'إنت مين', 'مين انت', 'مين إنت',
+    'اتكلم عن نفسك', 'كلمنا عن نفسك',
+    'introduce yourself', 'who are you', 'tell us about yourself',
+    'tell me about yourself', 'what are you', 'describe yourself',
+    'self introduction', 'about masar', 'what is masar',
+]
+
+_INTRO_TEXT = (
+    'أهلاً بحضراتكم، شرف كبير ليا وجودي معاكم . '
+    'أنا مسار، وكيل ذكاء اصطناعي صوتي تم تطويري بالكامل على إيد مهندسين '
+    'قسم الإلكترونيات والاتصالات في جامعة MTI. '
+    'أنا بشتغل في الوقت الفعلي، '
+    'وبفهم المصطلحات الهندسية الممزوجة بالعامية المصرية. '
+    'وظيفتي أشتغل كمساعد ذكي لمهندس الاتصالات في الموقع، '
+    'وبقدّم حلول وتصميمات فورية مبنية ومطابقة لمعايير الـ ITU-T والـ 3GPP والـ IEEE.'
+    'وأخيراً، أتمنى لحضراتكم مناقشة موفقة، وأنا تحت أمركم لو حابين تجربوا أي حاجة.'
+)
+
+
+def _is_intro_request(text: str) -> bool:
+    lower = text.lower().strip()
+    return any(t in lower for t in _INTRO_TRIGGERS)
 
 
 @app.post("/solve")
@@ -344,6 +376,24 @@ async def solve(req: SolveRequest) -> StreamingResponse:
     SSE format:  data: <json-encoded token>\\n\\n
                  data: [DONE]\\n\\n
     """
+    req.service_id = _remap_service(req.service_id)
+    # Fixed intro — bypass LLM entirely (general service only)
+    is_general  = req.service_id == "general"
+    intro_match = _is_intro_request(req.refined_prompt) or _is_intro_request(req.original_text)
+    if is_general and intro_match:
+        logger.info("SOLVE: intro request detected, returning fixed text")
+        async def intro_stream():
+            sentences = re.split(r'(?<=[.؟!])\s*', _INTRO_TEXT.strip())
+            for s in sentences:
+                s = s.strip()
+                if s:
+                    yield f"data: {json.dumps(s + ' ')}\n\n"
+                    await asyncio.sleep(0.4)
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(
+            intro_stream(), media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
     planning_prompt = SERVICE_PROMPTS.get(req.service_id, SERVICE_PROMPTS["general"])
     full_prompt     = f"Tech level: {req.tech_level}\n\nRequest:\n{req.refined_prompt}"
 
@@ -566,7 +616,8 @@ async def tts(req: TTSRequest) -> Response:
         return b"".join(chunks)
 
     try:
-        audio_bytes = await loop.run_in_executor(None, _synthesize)
+        async with _tts_semaphore:
+            audio_bytes = await loop.run_in_executor(None, _synthesize)
         return Response(
             content=audio_bytes,
             media_type="audio/mpeg",
@@ -592,6 +643,9 @@ async def tts_sentence(req: TTSRequest) -> Response:
     voice        = req.voice_id or DEFAULT_VOICE_ID or "UR972wNGq3zluze0LoIp"
     loop         = asyncio.get_event_loop()
     cleaned_text = clean_for_tts(req.text)
+    if not cleaned_text:
+        logger.warning("[TTS-SENTENCE] empty text after cleaning, skipping")
+        return Response(content=b"", status_code=204)
     logger.info("TTS-sentence voice=%s chars=%d", voice, len(cleaned_text))
     logger.info("[TTS-OUT] %s", cleaned_text)
 
@@ -604,14 +658,22 @@ async def tts_sentence(req: TTSRequest) -> Response:
         )
         return b"".join(chunks)
 
-    try:
-        audio_bytes = await loop.run_in_executor(None, _synthesize)
-        return Response(content=audio_bytes, media_type="audio/mpeg",
-                        headers={"Cache-Control": "no-store"})
-    except Exception as e:
-        logger.error("TTS-sentence error: %s", e)
-        return Response(content=b"", status_code=502,
-                        headers={"X-TTS-Error": str(e)})
+    for attempt in range(2):
+        try:
+            async with _tts_semaphore:
+                audio_bytes = await loop.run_in_executor(None, _synthesize)
+            return Response(content=audio_bytes, media_type="audio/mpeg",
+                            headers={"Cache-Control": "no-store"})
+        except Exception as e:
+            err_str = str(e)
+            is_rate = "429" in err_str or "concurrent" in err_str.lower()
+            if is_rate and attempt == 0:
+                logger.warning("[TTS-SENTENCE] rate limited, retrying in 2s")
+                await asyncio.sleep(2)
+                continue
+            logger.error("[TTS-SENTENCE] failed: %s", repr(e))
+            return Response(content=b"", status_code=502,
+                            headers={"X-TTS-Error": err_str})
 
 
 def chunk_text(text: str, max_chars: int = 150) -> list:
@@ -677,6 +739,7 @@ class SessionTitleRequest(BaseModel):
 @app.post("/session-title")
 async def session_title(req: SessionTitleRequest):
     """Generate a short English session title (3-5 words, Title Case) using Claude Haiku."""
+    req.service_id = _remap_service(req.service_id)
     for attempt in range(2):
         try:
             message = await anthropic.messages.create(

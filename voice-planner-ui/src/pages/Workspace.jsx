@@ -13,6 +13,7 @@ import CalcSheetPanel  from '../components/CalcSheetPanel';
 import FileUploadButton from '../components/FileUploadButton';
 import DiagramsDrawer from '../components/DiagramsDrawer';
 import CalcSheetsDrawer from '../components/CalcSheetsDrawer';
+import SettingsPanel from '../components/SettingsPanel';
 import { exportSessionPDF } from '../utils/generatePDF';
 
 const TOUR_STEPS_WORKSPACE = [
@@ -52,8 +53,8 @@ const VAD_THRESHOLDS = { low: 0.20, medium: 0.10, high: 0.05 };
 const VAD_SILENCE_MS = 4000;
 const VAD_MIN_SPEECH = 600;
 
-const DIAGRAM_SERVICES = new Set(['topology','fiber','ip','redundancy','security','monitoring','capacity','qos']);
-const CALC_SERVICES    = new Set(['fiber','capacity','ip','redundancy','qos','monitoring','security']);
+const DIAGRAM_SERVICES = new Set(['mobile','antenna_rf','fiber','ip','capacity','qos','infrastructure']);
+const CALC_SERVICES    = new Set(['mobile','antenna_rf','fiber','ip','capacity','qos','infrastructure']);
 const API_BASE = import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000';
 
 const DEFAULT_SERVICE = {
@@ -148,8 +149,9 @@ export default function Workspace() {
   const [showText,    setShowText]    = useState(false);
   const [showDiagramsDrawer, setShowDiagramsDrawer] = useState(false);
   const [showCalcDrawer,     setShowCalcDrawer]      = useState(false);
-  const [techLevel]      = useState(() => localStorage.getItem('masar_tech_level') ?? 'Professional');
-  const [vadSensitivity] = useState(() => localStorage.getItem('masar_vad')        ?? 'medium');
+  const [techLevel, setTechLevel]           = useState(() => localStorage.getItem('masar_tech_level') ?? 'Professional');
+  const [vadSensitivity, setVadSensitivity] = useState(() => localStorage.getItem('masar_vad')        ?? 'medium');
+  const [showSettings, setShowSettings]     = useState(false);
   const [callActive, setCallActive] = useState(false);
   const [sessions,   setSessions]   = useState(() => {
     try { return JSON.parse(localStorage.getItem('masar_sessions') || '[]'); } catch { return []; }
@@ -336,6 +338,7 @@ export default function Workspace() {
           setSolutions, setSolvingIds, conversationHistory,
           enqueue, onComplete,
           attachedFileRef.current,
+          t.text,
         );
       }
     });
@@ -485,7 +488,24 @@ export default function Workspace() {
     const prev = prevStateRef.current;
     prevStateRef.current = masarState;
     if (!callActive) return;
-    if (prev !== 'idle' && masarState === 'idle') startRecording();
+    if (prev !== 'idle' && masarState === 'idle') {
+      if (!bargeInRef.current && prev === 'speaking') {
+        const deadline = Date.now() + 5000;
+        let active = true;
+        const waitForSilence = () => {
+          if (!active) return;
+          const level = audioLevelRef.current ?? 0;
+          if (level < VAD_THRESHOLDS[vadSensitivity] || Date.now() > deadline) {
+            startRecording();
+          } else {
+            requestAnimationFrame(waitForSilence);
+          }
+        };
+        requestAnimationFrame(waitForSilence);
+        return () => { active = false; };
+      }
+      startRecording();
+    }
   }, [masarState, callActive]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Barge-in — reads audioLevelRef (kept live by monitoring pipeline between turns)
@@ -1414,7 +1434,7 @@ export default function Workspace() {
             </TopBarBtn>
           )}
           <ThemeToggle />
-          <TopBarBtn onClick={() => navigate('/settings')} title="Settings">
+          <TopBarBtn onClick={() => setShowSettings(true)} title="Settings">
             ⚙
           </TopBarBtn>
         </div>
@@ -1550,6 +1570,15 @@ export default function Workspace() {
 
       <DiagramsDrawer open={showDiagramsDrawer} onClose={() => setShowDiagramsDrawer(false)} />
       <CalcSheetsDrawer open={showCalcDrawer} onClose={() => setShowCalcDrawer(false)} />
+      <SettingsPanel
+        open={showSettings}
+        onClose={() => setShowSettings(false)}
+        onSettingChange={(key, value) => {
+          if (key === 'masar_bargein') bargeInRef.current = value === 'true';
+          if (key === 'masar_tech_level') setTechLevel(value);
+          if (key === 'masar_vad') setVadSensitivity(value);
+        }}
+      />
 
     </div>
   );
@@ -1670,6 +1699,7 @@ async function streamSolveAndSpeak(
   enqueueSentence,      // (sentence: string) => void
   onComplete,           // (fullText: string) => void
   attachedFile = null,  // { data, type, mime, name } | null
+  originalText = '',    // Arabic transcript for intro detection
 ) {
   setSolutions(prev => ({ ...prev, [turnId]: '' }));
   setSolvingIds(prev => ({ ...prev, [turnId]: true }));
@@ -1691,6 +1721,7 @@ async function streamSolveAndSpeak(
         file_data: attachedFile?.data ?? '',
         file_type: attachedFile?.type ?? '',
         file_mime: attachedFile?.mime ?? '',
+        original_text: originalText,
       }),
     });
 

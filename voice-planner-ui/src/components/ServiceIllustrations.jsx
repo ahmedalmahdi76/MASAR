@@ -266,15 +266,66 @@ function GeneralIllustration() {
   );
 }
 
+/* ── 10. Mobile Communications ─────────────────────────────────────────── */
+function MobileIllustration() {
+  return (
+    <svg className="service-illus" style={BASE} viewBox="0 0 300 160" preserveAspectRatio="xMidYMid slice">
+      <style>{`
+        @keyframes mob-pulse-1 { 0%{r:15;opacity:0.7} 100%{r:55;opacity:0} }
+        @keyframes mob-pulse-2 { 0%{r:15;opacity:0.5} 100%{r:70;opacity:0} }
+        @keyframes mob-pulse-3 { 0%{r:15;opacity:0.3} 100%{r:85;opacity:0} }
+        .mp1{animation:mob-pulse-1 2.5s ease-out infinite}
+        .mp2{animation:mob-pulse-2 2.5s ease-out infinite 0.8s}
+        .mp3{animation:mob-pulse-3 2.5s ease-out infinite 1.6s}
+      `}</style>
+      {/* Cell tower */}
+      <line x1="150" y1="40" x2="150" y2="130" stroke="#F59E0B" strokeWidth="3" />
+      <line x1="130" y1="130" x2="170" y2="130" stroke="#F59E0B" strokeWidth="2" />
+      <line x1="135" y1="60" x2="165" y2="60" stroke="#F59E0B" strokeWidth="1.5" />
+      <line x1="140" y1="80" x2="160" y2="80" stroke="#F59E0B" strokeWidth="1.5" />
+      {/* Signal waves */}
+      <circle className="mp1" cx="150" cy="40" r="15" fill="none" stroke="#F59E0B" strokeWidth="1.5" />
+      <circle className="mp2" cx="150" cy="40" r="15" fill="none" stroke="#F59E0B" strokeWidth="1" />
+      <circle className="mp3" cx="150" cy="40" r="15" fill="none" stroke="#F59E0B" strokeWidth="0.7" />
+      {/* Tower top */}
+      <circle cx="150" cy="38" r="4" fill="#F59E0B" opacity="0.8" />
+    </svg>
+  );
+}
+
+/* ── 11. Antennas & RF ─────────────────────────────────────────────────── */
+function AntennaRfIllustration() {
+  return (
+    <svg className="service-illus" style={BASE} viewBox="0 0 300 160" preserveAspectRatio="xMidYMid slice">
+      <style>{`
+        @keyframes rf-lobe { 0%{opacity:0.6;transform:scale(0.95)} 50%{opacity:0.9;transform:scale(1.05)} 100%{opacity:0.6;transform:scale(0.95)} }
+        .rfl{animation:rf-lobe 3s ease-in-out infinite;transform-origin:150px 80px}
+        .rfl2{animation:rf-lobe 3s ease-in-out infinite 1.5s;transform-origin:150px 80px}
+      `}</style>
+      {/* Antenna mast */}
+      <line x1="150" y1="30" x2="150" y2="140" stroke="#EF4444" strokeWidth="2.5" />
+      <line x1="140" y1="140" x2="160" y2="140" stroke="#EF4444" strokeWidth="2" />
+      {/* Radiation pattern lobes */}
+      <ellipse className="rfl" cx="190" cy="60" rx="35" ry="18" fill="none" stroke="#EF4444" strokeWidth="1.2" opacity="0.5" />
+      <ellipse className="rfl" cx="110" cy="60" rx="35" ry="18" fill="none" stroke="#EF4444" strokeWidth="1.2" opacity="0.5" />
+      <ellipse className="rfl2" cx="200" cy="60" rx="45" ry="24" fill="none" stroke="#EF4444" strokeWidth="0.8" opacity="0.3" />
+      <ellipse className="rfl2" cx="100" cy="60" rx="45" ry="24" fill="none" stroke="#EF4444" strokeWidth="0.8" opacity="0.3" />
+      {/* Antenna element */}
+      <line x1="140" y1="50" x2="150" y2="30" stroke="#EF4444" strokeWidth="1.5" />
+      <line x1="160" y1="50" x2="150" y2="30" stroke="#EF4444" strokeWidth="1.5" />
+      <circle cx="150" cy="28" r="3" fill="#EF4444" opacity="0.9" />
+    </svg>
+  );
+}
+
 /* ── Export map ──────────────────────────────────────────────────────────── */
 export const ILLUSTRATIONS = {
-  fiber:      FiberIllustration,
-  topology:   TopologyIllustration,
-  ip:         IpIllustration,
-  monitoring: MonitoringIllustration,
-  capacity:   CapacityIllustration,
-  redundancy: RedundancyIllustration,
-  security:   SecurityIllustration,
-  qos:        QosIllustration,
-  general:    GeneralIllustration,
+  mobile:         MobileIllustration,
+  antenna_rf:     AntennaRfIllustration,
+  fiber:          FiberIllustration,
+  ip:             IpIllustration,
+  capacity:       CapacityIllustration,
+  qos:            QosIllustration,
+  infrastructure: TopologyIllustration,
+  general:        GeneralIllustration,
 };
