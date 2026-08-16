@@ -1,6 +1,10 @@
 # MASAR — AI Network Planner مسار
 
 **MASAR** (مسار) is a voice-driven AI assistant for telecom network planning, built as an ECE graduation project at MTI University. Engineers speak in Egyptian Arabic and receive structured, professional network planning solutions in real time.
+Made by: 
+Eng. Ahmed Mohamed Almahdi.
+Eng.Saleh Khodier
+Eng.Yassin Mounir
 
 ---
 
